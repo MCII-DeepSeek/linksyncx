@@ -30,7 +30,7 @@ var (
 const (
 	updateCacheKey   = "update_check_cache"
 	updateCacheTTL   = 1200 // 20 minutes
-	customGitHubRepo = "dreamforSh/linksyncx"
+	customGitHubRepo = "MCII-DeepSeek/linksyncx"
 	customTagPrefix  = "custom-v"
 
 	// Security: allowed download domains for updates
