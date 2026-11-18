@@ -330,6 +330,11 @@ func DefaultMappedModel(v string) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldDefaultMappedModel, v))
 }
 
+// SystemPrompt applies equality check predicate on the "system_prompt" field. It's identical to SystemPromptEQ.
+func SystemPrompt(v string) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldSystemPrompt, v))
+}
+
 // RpmLimit applies equality check predicate on the "rpm_limit" field. It's identical to RpmLimitEQ.
 func RpmLimit(v int) predicate.Group {
 	return predicate.Group(sql.FieldEQ(FieldRpmLimit, v))
@@ -2618,6 +2623,71 @@ func DefaultMappedModelEqualFold(v string) predicate.Group {
 // DefaultMappedModelContainsFold applies the ContainsFold predicate on the "default_mapped_model" field.
 func DefaultMappedModelContainsFold(v string) predicate.Group {
 	return predicate.Group(sql.FieldContainsFold(FieldDefaultMappedModel, v))
+}
+
+// SystemPromptEQ applies the EQ predicate on the "system_prompt" field.
+func SystemPromptEQ(v string) predicate.Group {
+	return predicate.Group(sql.FieldEQ(FieldSystemPrompt, v))
+}
+
+// SystemPromptNEQ applies the NEQ predicate on the "system_prompt" field.
+func SystemPromptNEQ(v string) predicate.Group {
+	return predicate.Group(sql.FieldNEQ(FieldSystemPrompt, v))
+}
+
+// SystemPromptIn applies the In predicate on the "system_prompt" field.
+func SystemPromptIn(vs ...string) predicate.Group {
+	return predicate.Group(sql.FieldIn(FieldSystemPrompt, vs...))
+}
+
+// SystemPromptNotIn applies the NotIn predicate on the "system_prompt" field.
+func SystemPromptNotIn(vs ...string) predicate.Group {
+	return predicate.Group(sql.FieldNotIn(FieldSystemPrompt, vs...))
+}
+
+// SystemPromptGT applies the GT predicate on the "system_prompt" field.
+func SystemPromptGT(v string) predicate.Group {
+	return predicate.Group(sql.FieldGT(FieldSystemPrompt, v))
+}
+
+// SystemPromptGTE applies the GTE predicate on the "system_prompt" field.
+func SystemPromptGTE(v string) predicate.Group {
+	return predicate.Group(sql.FieldGTE(FieldSystemPrompt, v))
+}
+
+// SystemPromptLT applies the LT predicate on the "system_prompt" field.
+func SystemPromptLT(v string) predicate.Group {
+	return predicate.Group(sql.FieldLT(FieldSystemPrompt, v))
+}
+
+// SystemPromptLTE applies the LTE predicate on the "system_prompt" field.
+func SystemPromptLTE(v string) predicate.Group {
+	return predicate.Group(sql.FieldLTE(FieldSystemPrompt, v))
+}
+
+// SystemPromptContains applies the Contains predicate on the "system_prompt" field.
+func SystemPromptContains(v string) predicate.Group {
+	return predicate.Group(sql.FieldContains(FieldSystemPrompt, v))
+}
+
+// SystemPromptHasPrefix applies the HasPrefix predicate on the "system_prompt" field.
+func SystemPromptHasPrefix(v string) predicate.Group {
+	return predicate.Group(sql.FieldHasPrefix(FieldSystemPrompt, v))
+}
+
+// SystemPromptHasSuffix applies the HasSuffix predicate on the "system_prompt" field.
+func SystemPromptHasSuffix(v string) predicate.Group {
+	return predicate.Group(sql.FieldHasSuffix(FieldSystemPrompt, v))
+}
+
+// SystemPromptEqualFold applies the EqualFold predicate on the "system_prompt" field.
+func SystemPromptEqualFold(v string) predicate.Group {
+	return predicate.Group(sql.FieldEqualFold(FieldSystemPrompt, v))
+}
+
+// SystemPromptContainsFold applies the ContainsFold predicate on the "system_prompt" field.
+func SystemPromptContainsFold(v string) predicate.Group {
+	return predicate.Group(sql.FieldContainsFold(FieldSystemPrompt, v))
 }
 
 // RpmLimitEQ applies the EQ predicate on the "rpm_limit" field.

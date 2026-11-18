@@ -571,6 +571,7 @@ export interface AdminGroup extends Group {
   default_mapped_model?: string
   messages_dispatch_model_config?: OpenAIMessagesDispatchModelConfig
   model_allowlist?: ModelAllowlist
+  system_prompt?: string
   codex_models_manifest_config?: CodexModelsManifestConfig
 
   // 分组排序
@@ -709,6 +710,7 @@ export interface UpdateApiKeyRequest {
 export interface CreateGroupRequest {
   name: string
   description?: string | null
+  system_prompt?: string
   platform?: GroupPlatform
   kind?: GroupKind
   category?: GroupCategory
@@ -777,6 +779,7 @@ export interface CreateGroupRequest {
 export interface UpdateGroupRequest {
   name?: string
   description?: string | null
+  system_prompt?: string
   platform?: GroupPlatform
   category?: GroupCategory
   managed_type?: ManagedGroupType

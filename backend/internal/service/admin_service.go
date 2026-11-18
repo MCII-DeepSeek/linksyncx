@@ -235,9 +235,10 @@ type AdminBoundAuthIdentityChannel struct {
 }
 
 type CreateGroupInput struct {
-	Name        string
-	Description string
-	Platform    string
+	Name         string
+	Description  string
+	SystemPrompt string
+	Platform     string
 	// Kind 分组类型：channel（默认）/ managed；Category 仅管理分组使用（enterprise / team，默认 team）。
 	Kind                      string
 	Category                  string
@@ -319,9 +320,10 @@ type CreateGroupInput struct {
 }
 
 type UpdateGroupInput struct {
-	Name        string
-	Description *string
-	Platform    string
+	Name         string
+	Description  *string
+	SystemPrompt *string
+	Platform     string
 	// Kind 仅用于不可变校验：非空且与现值不同则拒绝。Category 为 nil 表示不修改。
 	Kind                      string
 	Category                  *string

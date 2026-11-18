@@ -568,6 +568,11 @@
           ></textarea>
         </div>
         <div>
+          <label for="create-group-system-prompt" class="input-label">{{ t("admin.groups.form.systemPrompt") }}</label>
+          <textarea id="create-group-system-prompt" v-model="createForm.system_prompt" rows="3" maxlength="8192" class="input" />
+          <p class="input-hint">{{ t("admin.groups.form.systemPromptHint") }}</p>
+        </div>
+        <div>
           <label class="input-label">{{
             t("admin.groups.form.platform")
           }}</label>
@@ -2204,6 +2209,11 @@
             rows="3"
             class="input"
           ></textarea>
+        </div>
+        <div>
+          <label for="edit-group-system-prompt" class="input-label">{{ t("admin.groups.form.systemPrompt") }}</label>
+          <textarea id="edit-group-system-prompt" v-model="editForm.system_prompt" rows="3" maxlength="8192" class="input" />
+          <p class="input-hint">{{ t("admin.groups.form.systemPromptHint") }}</p>
         </div>
         <div>
           <label class="input-label">{{
@@ -5061,6 +5071,7 @@ const createForm = reactive({
   managed_type: "quota" as ManagedGroupType,
   name: "",
   description: "",
+  system_prompt: "",
   platform: "anthropic" as GroupPlatform,
   rate_multiplier: 1.0,
   is_exclusive: false,
@@ -5427,6 +5438,7 @@ const editForm = reactive({
   managed_type: "quota" as ManagedGroupType,
   name: "",
   description: "",
+  system_prompt: "",
   platform: "anthropic" as GroupPlatform,
   rate_multiplier: 1.0,
   is_exclusive: false,
@@ -5927,6 +5939,7 @@ const closeCreateModal = () => {
   clearAllAccountSearchState();
   createForm.name = "";
   createForm.description = "";
+  createForm.system_prompt = "";
   createForm.platform = "anthropic";
   createForm.rate_multiplier = 1.0;
   createForm.is_exclusive = false;
@@ -6189,6 +6202,7 @@ const handleCreateGroup = async () => {
       ? {
           name: createForm.name,
           description: createForm.description,
+          system_prompt: createForm.system_prompt,
           platform: createForm.platform,
           kind: createForm.kind,
           ...(managed ? { category: createForm.category, managed_type: createForm.managed_type } : {}),
@@ -6219,6 +6233,7 @@ const handleEdit = async (group: AdminGroup) => {
   editForm.managed_type = group.managed_type ?? "quota";
   editForm.name = group.name;
   editForm.description = group.description || "";
+  editForm.system_prompt = group.system_prompt ?? "";
   editForm.platform = group.platform;
   editForm.rate_multiplier = group.rate_multiplier;
   editForm.is_exclusive = group.is_exclusive;
@@ -6551,6 +6566,7 @@ const handleUpdateGroup = async () => {
       ? {
           name: editForm.name,
           description: editForm.description,
+          system_prompt: editForm.system_prompt,
           ...(managed ? { category: editForm.category, managed_type: editForm.managed_type } : {}),
         }
       : payload;

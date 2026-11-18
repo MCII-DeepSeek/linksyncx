@@ -5,7 +5,7 @@
       <p>{{ t('admin.accounts.customUsage.loadFailed') }}</p>
       <button class="btn btn-secondary" type="button" @click="load">{{ t('admin.accounts.customUsage.retry') }}</button>
     </div>
-    <form v-else id="custom-usage-form" class="space-y-4" @submit.prevent="save">
+    <form v-else id="custom-usage-form" class="space-y-4" novalidate @submit.prevent="save">
       <div class="flex items-center justify-between gap-4 rounded-lg border border-gray-200 bg-gray-50/70 px-4 py-3 dark:border-dark-600 dark:bg-dark-800/60">
         <div><h4 class="text-sm font-medium text-gray-900 dark:text-gray-100">{{ t('admin.accounts.customUsage.enabled') }}</h4><p class="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{{ account?.name }}</p></div>
         <Toggle v-model="draft.enabled" :disabled="busy" :aria-label="t('admin.accounts.customUsage.enabled')" />
@@ -83,8 +83,7 @@ const secretFields = [
 ] as const
 const visibleSecretFields = computed(() => secretFields.filter(field => {
   if (draft.value.template === 'custom') return true
-  if (draft.value.template === 'newapi') return field.name === 'access_token' && (!draft.value.uses_account_access_token || draft.value.has_access_token)
-  return field.name === 'api_key' && (!draft.value.uses_account_api_key || draft.value.has_api_key)
+  return field.name === (draft.value.template === 'newapi' ? 'access_token' : 'api_key')
 }))
 const credentialMode = computed(() => {
   if (draft.value.template === 'newapi' && draft.value.uses_account_access_token) return t('admin.accounts.customUsage.followAccountCredential')
@@ -100,7 +99,7 @@ const testing = ref(false)
 const saving = ref(false)
 const busy = computed(() => testing.value || saving.value)
 const validation = ref<UsageValidationError | null>(null)
-const actionError = ref<'queryFailed' | 'saveFailed' | null>(null)
+const actionError = ref<'queryFailed' | 'saveFailed' | 'invalidConfig' | 'configChanged' | null>(null)
 const testResult = ref<UsageResult | null>(null)
 let controller: AbortController | undefined
 function reset() {
@@ -132,7 +131,7 @@ async function load() {
     const emptyConfig = !config.configured && !config.request?.url && !Object.keys(config.extractor ?? {}).length
     draft.value = {
       ...defaults, ...(emptyConfig ? { has_api_key: config.has_api_key, has_access_token: config.has_access_token } : config),
-      base_url: config.base_url || defaults.base_url,
+      base_url: emptyConfig ? defaults.base_url : config.base_url,
       api_key: '', access_token: '', clear_api_key: false, clear_access_token: false
     }
     syncEditors()
@@ -140,11 +139,11 @@ async function load() {
   finally { if (!request.signal.aborted) loading.value = false }
 }
 function payload() {
-  const parsed = parseUsageEditors(headersText.value, extractorText.value)
+  const parsed = parseUsageEditors(headersText.value, extractorText.value, draft.value.enabled)
   validation.value = parsed.error ?? null
   if (parsed.error || !parsed.headers || !parsed.extractor) return null
   const result = usagePayload({ ...draft.value, request: { ...draft.value.request, headers: parsed.headers }, extractor: parsed.extractor })
-  validation.value = validateUsageDraft(result)
+  validation.value = validateUsageDraft(result, String(props.account?.credentials?.base_url ?? ''))
   return validation.value ? null : result
 }
 async function test() {
@@ -169,7 +168,11 @@ async function save() {
     if (request.signal.aborted) return
     emit('saved', id, { enabled: config.enabled, interval_minutes: config.interval_minutes })
     reset(); emit('close')
-  } catch { if (!request.signal.aborted) actionError.value = 'saveFailed' }
+  } catch (error) {
+    if (request.signal.aborted) return
+    const status = (error as { status?: number } | null)?.status
+    actionError.value = status === 400 ? 'invalidConfig' : status === 409 ? 'configChanged' : 'saveFailed'
+  }
   finally { if (!request.signal.aborted) saving.value = false }
 }
 function close() { if (!saving.value) { reset(); emit('close') } }

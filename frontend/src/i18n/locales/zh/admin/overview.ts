@@ -1073,6 +1073,8 @@ export default {
       form: {
         name: '名称',
         description: '描述',
+        systemPrompt: '系统提示词',
+        systemPromptHint: '按客户端协议插入到文本请求现有指令的前面。留空则不注入。',
         platform: '平台',
         rateMultiplier: '费率倍数',
         status: '状态',

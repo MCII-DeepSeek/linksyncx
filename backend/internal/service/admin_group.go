@@ -387,7 +387,7 @@ func normalizeCreateGroupInputForSimpleMode(input *CreateGroupInput) {
 		return
 	}
 	*input = CreateGroupInput{
-		Name: input.Name, Description: input.Description, Platform: input.Platform,
+		Name: input.Name, Description: input.Description, SystemPrompt: input.SystemPrompt, Platform: input.Platform,
 		Kind: input.Kind, Category: input.Category, ManagedType: input.ManagedType,
 		RateMultiplier: 1, SubscriptionType: SubscriptionTypeStandard,
 	}
@@ -397,7 +397,7 @@ func normalizeUpdateGroupInputForSimpleMode(input *UpdateGroupInput) {
 	if input == nil {
 		return
 	}
-	*input = UpdateGroupInput{Name: input.Name, Description: input.Description, Kind: input.Kind, Category: input.Category, ManagedType: input.ManagedType}
+	*input = UpdateGroupInput{Name: input.Name, Description: input.Description, SystemPrompt: input.SystemPrompt, Kind: input.Kind, Category: input.Category, ManagedType: input.ManagedType}
 }
 
 func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupInput) (*Group, error) {
@@ -604,6 +604,7 @@ func (s *adminServiceImpl) CreateGroup(ctx context.Context, input *CreateGroupIn
 	group := &Group{
 		Name:                            input.Name,
 		Description:                     input.Description,
+		SystemPrompt:                    strings.TrimSpace(input.SystemPrompt),
 		Platform:                        platform,
 		Kind:                            kind,
 		Category:                        category,
@@ -853,6 +854,9 @@ func (s *adminServiceImpl) UpdateGroup(ctx context.Context, id int64, input *Upd
 	}
 	if input.Description != nil {
 		group.Description = *input.Description
+	}
+	if input.SystemPrompt != nil {
+		group.SystemPrompt = strings.TrimSpace(*input.SystemPrompt)
 	}
 	if input.Platform != "" {
 		group.Platform = input.Platform

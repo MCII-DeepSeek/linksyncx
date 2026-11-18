@@ -102,6 +102,7 @@ const channelGroup = {
   ...baseGroup,
   id: 42,
   name: 'claude-pool',
+  system_prompt: 'Existing group prompt',
   platform: 'anthropic',
   is_exclusive: false,
   kind: 'channel'
@@ -253,7 +254,7 @@ describe('GroupsView group kinds', () => {
     expect(payload).not.toHaveProperty('category')
   })
 
-  it('sends kind and category in simple mode', async () => {
+  it('sends kind, category and system prompt in simple mode', async () => {
     authState.isSimpleMode = true
     const wrapper = mountView()
     await flushPromises()
@@ -261,12 +262,14 @@ describe('GroupsView group kinds', () => {
 
     await wrapper.get('[data-testid="group-kind-managed"] input').setValue(true)
     await wrapper.get('[data-tour="group-form-name"]').setValue('acme')
+    await wrapper.get('#create-group-system-prompt').setValue('你好，这是系统提示词')
     await wrapper.get('#create-group-form').trigger('submit')
     await flushPromises()
 
     expect(createGroup).toHaveBeenCalledWith({
       name: 'acme',
       description: '',
+      system_prompt: '你好，这是系统提示词',
       platform: 'anthropic',
       kind: 'managed',
       category: 'enterprise',
@@ -379,7 +382,7 @@ describe('GroupsView group kinds', () => {
     }))
   })
 
-  it('omits the category when editing a channel group', async () => {
+  it('loads and clears a channel group system prompt while omitting the category', async () => {
     const wrapper = mountView()
     await flushPromises()
 
@@ -388,11 +391,15 @@ describe('GroupsView group kinds', () => {
     await flushPromises()
 
     expect(wrapper.find('[data-testid="group-category-field"]').exists()).toBe(false)
+    const promptField = wrapper.get<HTMLTextAreaElement>('#edit-group-system-prompt')
+    expect(promptField.element.value).toBe(channelGroup.system_prompt)
+    await promptField.setValue('')
     await wrapper.get('#edit-group-form').trigger('submit')
     await flushPromises()
 
     expect(updateGroup.mock.calls[0]?.[1]).not.toHaveProperty('category')
     expect(updateGroup.mock.calls[0]?.[1]).not.toHaveProperty('managed_type')
+    expect(updateGroup).toHaveBeenCalledWith(42, expect.objectContaining({ system_prompt: '' }))
   })
 
   it('switches a managed group to a subscription group with a warning', async () => {

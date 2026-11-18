@@ -37,7 +37,7 @@ const validURL = (value: string): boolean => {
 // Only property/index traversal, never expressions, functions, filters or JavaScript.
 const validPath = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 256 && /^(?:\$\.)?[A-Za-z_][\w-]*(?:(?:\.[A-Za-z_][\w-]*)|(?:\[\d+\])|(?:\.\d+))*$/.test(value) && value.split(/[.\[\]]/).filter(Boolean).length <= 24 && !value.split(/[.\[\]]/).some(part => ['__proto__', 'constructor', 'prototype'].includes(part))
 
-export function parseUsageEditors(headersText: string, extractorText: string): { headers?: Record<string, string>; extractor?: CustomUsageExtractor; error?: UsageValidationError } {
+export function parseUsageEditors(headersText: string, extractorText: string, enabled = true): { headers?: Record<string, string>; extractor?: CustomUsageExtractor; error?: UsageValidationError } {
   let headers: unknown, extractor: unknown
   try { headers = JSON.parse(headersText); extractor = JSON.parse(extractorText) } catch { return { error: 'invalidJson' } }
   if (!isObject(headers) || Object.entries(headers).some(([name, value]) => !/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(name) || typeof value !== 'string' || value.length > 8192 || /[\r\n]/.test(value) || value.includes(String.fromCharCode(0)) || ['__proto__', 'constructor', 'prototype'].includes(name))) return { error: 'invalidHeaders' }
@@ -45,7 +45,7 @@ export function parseUsageEditors(headersText: string, extractorText: string): {
   const forbidden = new Set(['host', 'connection', 'content-length', 'transfer-encoding', 'upgrade', 'proxy-authorization', 'proxy-connection', 'te', 'trailer', 'accept-encoding'])
   if (names.length > 24 || new Set(names).size !== names.length || names.some(name => forbidden.has(name))) return { error: 'invalidHeaders' }
   if (Object.values(headers).some(value => !validTemplate(String(value)))) return { error: 'invalidPlaceholder' }
-  if (!isObject(extractor) || !Object.keys(extractor).length) return { error: 'invalidExtractor' }
+  if (!isObject(extractor)) return { error: 'invalidExtractor' }
   for (const [name, spec] of Object.entries(extractor)) {
     if (!isObject(spec)) return { error: 'invalidExtractor' }
     if (['remaining', 'used', 'total'].includes(name)) {
@@ -54,17 +54,18 @@ export function parseUsageEditors(headersText: string, extractorText: string): {
       if (Object.keys(spec).some(key => !['path', 'value'].includes(key)) || (!spec.path && !spec.value) || (Boolean(spec.path) && Boolean(spec.value)) || (spec.path !== undefined && !validPath(spec.path)) || (spec.value !== undefined && (typeof spec.value !== 'string' || spec.value.length > 128 || /[<>{}\\]/.test(spec.value) || [...spec.value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127)))) return { error: 'invalidExtractor' }
     } else return { error: 'invalidExtractor' }
   }
-  if (!['remaining', 'used', 'total'].some(key => extractor[key] !== undefined)) return { error: 'invalidExtractor' }
+  if (enabled && !['remaining', 'used', 'total'].some(key => extractor[key] !== undefined)) return { error: 'invalidExtractor' }
   return { headers: headers as Record<string, string>, extractor: extractor as CustomUsageExtractor }
 }
 
-export function validateUsageDraft(config: CustomUsageConfig): UsageValidationError | null {
+export function validateUsageDraft(config: CustomUsageConfig, accountBaseURL = ''): UsageValidationError | null {
   if (!Number.isInteger(config.timeout_seconds) || config.timeout_seconds < 1 || config.timeout_seconds > 30) return 'invalidTimeout'
   if (!Number.isSafeInteger(config.interval_minutes) || (config.interval_minutes !== 0 && config.interval_minutes < 5) || config.interval_minutes > 525600) return 'invalidInterval'
   if (!validTemplate(config.request.url)) return 'invalidPlaceholder'
-  const resolved = config.request.url.replace(/\{\{(baseUrl|apiKey|accessToken|userId)\}\}/g, (_, name: string) => name === 'baseUrl' ? config.base_url.trim().replace(/\/+$/, '') : 'placeholder')
-  if (!validURL(config.base_url.trim()) || !validURL(resolved)) return 'invalidUrl'
-  return parseUsageEditors(JSON.stringify(config.request.headers), JSON.stringify(config.extractor)).error ?? null
+  const baseURL = (config.base_url.trim() || accountBaseURL.trim()).replace(/\/+$/, '')
+  const resolved = config.request.url.replace(/\{\{(baseUrl|apiKey|accessToken|userId)\}\}/g, (_, name: string) => name === 'baseUrl' ? baseURL : 'placeholder')
+  if ((baseURL && !validURL(baseURL)) || (config.enabled && !validURL(resolved))) return 'invalidUrl'
+  return parseUsageEditors(JSON.stringify(config.request.headers), JSON.stringify(config.extractor), config.enabled).error ?? null
 }
 
 export function usagePayload(config: CustomUsageConfig): CustomUsageConfig {

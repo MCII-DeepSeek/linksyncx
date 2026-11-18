@@ -1098,6 +1098,8 @@ export default {
         nameLabel: 'Group Name',
         namePlaceholder: 'Enter group name',
         descriptionLabel: 'Description',
+        systemPrompt: 'System Prompt',
+        systemPromptHint: 'Prepended to existing instructions in supported text requests using the client protocol. Leave empty to disable.',
         descriptionPlaceholder: 'Enter description (optional)',
         rateMultiplierLabel: 'Rate Multiplier',
         rateMultiplierHint: '1.0 = standard rate, 0.5 = half price, 2.0 = double',

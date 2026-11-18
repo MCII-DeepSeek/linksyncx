@@ -844,6 +844,20 @@ func (_c *GroupCreate) SetNillableModelAllowlist(v *domain.GroupModelAllowlist) 
 	return _c
 }
 
+// SetSystemPrompt sets the "system_prompt" field.
+func (_c *GroupCreate) SetSystemPrompt(v string) *GroupCreate {
+	_c.mutation.SetSystemPrompt(v)
+	return _c
+}
+
+// SetNillableSystemPrompt sets the "system_prompt" field if the given value is not nil.
+func (_c *GroupCreate) SetNillableSystemPrompt(v *string) *GroupCreate {
+	if v != nil {
+		_c.SetSystemPrompt(*v)
+	}
+	return _c
+}
+
 // SetCodexModelsManifestConfig sets the "codex_models_manifest_config" field.
 func (_c *GroupCreate) SetCodexModelsManifestConfig(v domain.GroupCodexModelsManifestConfig) *GroupCreate {
 	_c.mutation.SetCodexModelsManifestConfig(v)
@@ -1225,6 +1239,10 @@ func (_c *GroupCreate) defaults() error {
 		v := group.DefaultModelAllowlist
 		_c.mutation.SetModelAllowlist(v)
 	}
+	if _, ok := _c.mutation.SystemPrompt(); !ok {
+		v := group.DefaultSystemPrompt
+		_c.mutation.SetSystemPrompt(v)
+	}
 	if _, ok := _c.mutation.CodexModelsManifestConfig(); !ok {
 		v := group.DefaultCodexModelsManifestConfig
 		_c.mutation.SetCodexModelsManifestConfig(v)
@@ -1447,6 +1465,9 @@ func (_c *GroupCreate) check() error {
 	}
 	if _, ok := _c.mutation.ModelAllowlist(); !ok {
 		return &ValidationError{Name: "model_allowlist", err: errors.New(`ent: missing required field "Group.model_allowlist"`)}
+	}
+	if _, ok := _c.mutation.SystemPrompt(); !ok {
+		return &ValidationError{Name: "system_prompt", err: errors.New(`ent: missing required field "Group.system_prompt"`)}
 	}
 	if _, ok := _c.mutation.CodexModelsManifestConfig(); !ok {
 		return &ValidationError{Name: "codex_models_manifest_config", err: errors.New(`ent: missing required field "Group.codex_models_manifest_config"`)}
@@ -1752,6 +1773,10 @@ func (_c *GroupCreate) createSpec() (*Group, *sqlgraph.CreateSpec) {
 	if value, ok := _c.mutation.ModelAllowlist(); ok {
 		_spec.SetField(group.FieldModelAllowlist, field.TypeJSON, value)
 		_node.ModelAllowlist = value
+	}
+	if value, ok := _c.mutation.SystemPrompt(); ok {
+		_spec.SetField(group.FieldSystemPrompt, field.TypeString, value)
+		_node.SystemPrompt = value
 	}
 	if value, ok := _c.mutation.CodexModelsManifestConfig(); ok {
 		_spec.SetField(group.FieldCodexModelsManifestConfig, field.TypeJSON, value)
@@ -2916,6 +2941,18 @@ func (u *GroupUpsert) SetModelAllowlist(v domain.GroupModelAllowlist) *GroupUpse
 // UpdateModelAllowlist sets the "model_allowlist" field to the value that was provided on create.
 func (u *GroupUpsert) UpdateModelAllowlist() *GroupUpsert {
 	u.SetExcluded(group.FieldModelAllowlist)
+	return u
+}
+
+// SetSystemPrompt sets the "system_prompt" field.
+func (u *GroupUpsert) SetSystemPrompt(v string) *GroupUpsert {
+	u.Set(group.FieldSystemPrompt, v)
+	return u
+}
+
+// UpdateSystemPrompt sets the "system_prompt" field to the value that was provided on create.
+func (u *GroupUpsert) UpdateSystemPrompt() *GroupUpsert {
+	u.SetExcluded(group.FieldSystemPrompt)
 	return u
 }
 
@@ -4222,6 +4259,20 @@ func (u *GroupUpsertOne) SetModelAllowlist(v domain.GroupModelAllowlist) *GroupU
 func (u *GroupUpsertOne) UpdateModelAllowlist() *GroupUpsertOne {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateModelAllowlist()
+	})
+}
+
+// SetSystemPrompt sets the "system_prompt" field.
+func (u *GroupUpsertOne) SetSystemPrompt(v string) *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetSystemPrompt(v)
+	})
+}
+
+// UpdateSystemPrompt sets the "system_prompt" field to the value that was provided on create.
+func (u *GroupUpsertOne) UpdateSystemPrompt() *GroupUpsertOne {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateSystemPrompt()
 	})
 }
 
@@ -5713,6 +5764,20 @@ func (u *GroupUpsertBulk) SetModelAllowlist(v domain.GroupModelAllowlist) *Group
 func (u *GroupUpsertBulk) UpdateModelAllowlist() *GroupUpsertBulk {
 	return u.Update(func(s *GroupUpsert) {
 		s.UpdateModelAllowlist()
+	})
+}
+
+// SetSystemPrompt sets the "system_prompt" field.
+func (u *GroupUpsertBulk) SetSystemPrompt(v string) *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.SetSystemPrompt(v)
+	})
+}
+
+// UpdateSystemPrompt sets the "system_prompt" field to the value that was provided on create.
+func (u *GroupUpsertBulk) UpdateSystemPrompt() *GroupUpsertBulk {
+	return u.Update(func(s *GroupUpsert) {
+		s.UpdateSystemPrompt()
 	})
 }
 

@@ -69,4 +69,38 @@ describe('CustomUsageConfigModal', () => {
     expect(config.request.headers).toEqual({ Authorization: 'Bearer {{apiKey}}', 'X-Token': '' })
     expect(config).not.toHaveProperty('api_key')
   })
+
+  it('saves an empty Base URL using the account URL for template validation', async () => {
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.get('#custom-usage-base').setValue('')
+    await wrapper.get('form').trigger('submit')
+    expect(saveConfigMock).toHaveBeenCalledWith(5, expect.objectContaining({ base_url: '' }), expect.any(AbortSignal))
+  })
+
+  it('persists a disabled custom configuration without a request or extractor', async () => {
+    getConfigMock.mockResolvedValueOnce({
+      enabled: false, template: 'custom', base_url: '', timeout_seconds: 10, interval_minutes: 0,
+      request: { url: '', method: 'GET', headers: {} }, extractor: {}, configured: true
+    })
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.get('form').trigger('submit')
+    expect(saveConfigMock).toHaveBeenCalledWith(5, expect.objectContaining({
+      enabled: false, base_url: '', extractor: {}, request: { url: '', method: 'GET', headers: {} }
+    }), expect.any(AbortSignal))
+  })
+
+  it('allows a separate key for a General template targeting another host', async () => {
+    getConfigMock.mockResolvedValueOnce({
+      enabled: true, template: 'general', base_url: 'https://dash.example.com', timeout_seconds: 10, interval_minutes: 10,
+      request: { url: '{{baseUrl}}/v1/usage', method: 'GET', headers: { Authorization: 'Bearer {{apiKey}}' } },
+      extractor: { remaining: { path: 'remaining' } }, configured: true, uses_account_api_key: true
+    })
+    const wrapper = mountModal()
+    await flushPromises()
+    await wrapper.get('#custom-usage-api_key').setValue('usage-only-key')
+    await wrapper.get('form').trigger('submit')
+    expect(saveConfigMock).toHaveBeenCalledWith(5, expect.objectContaining({ api_key: 'usage-only-key' }), expect.any(AbortSignal))
+  })
 })

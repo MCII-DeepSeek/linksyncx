@@ -170,7 +170,7 @@ func sanitizeCreateGroupRequestForSimpleMode(req *CreateGroupRequest) {
 	if req == nil {
 		return
 	}
-	allowed := CreateGroupRequest{Name: req.Name, Description: req.Description, Platform: req.Platform, Kind: req.Kind, Category: req.Category, ManagedType: req.ManagedType}
+	allowed := CreateGroupRequest{Name: req.Name, Description: req.Description, SystemPrompt: req.SystemPrompt, Platform: req.Platform, Kind: req.Kind, Category: req.Category, ManagedType: req.ManagedType}
 	allowed.RateMultiplier = 1
 	allowed.SubscriptionType = service.SubscriptionTypeStandard
 	*req = allowed
@@ -180,14 +180,15 @@ func sanitizeUpdateGroupRequestForSimpleMode(req *UpdateGroupRequest) {
 	if req == nil {
 		return
 	}
-	*req = UpdateGroupRequest{Name: req.Name, Description: req.Description, Kind: req.Kind, Category: req.Category, ManagedType: req.ManagedType}
+	*req = UpdateGroupRequest{Name: req.Name, Description: req.Description, SystemPrompt: req.SystemPrompt, Kind: req.Kind, Category: req.Category, ManagedType: req.ManagedType}
 }
 
 // CreateGroupRequest represents create group request
 type CreateGroupRequest struct {
-	Name        string `json:"name" binding:"required"`
-	Description string `json:"description"`
-	Platform    string `json:"platform" binding:"omitempty,oneof=anthropic openai gemini antigravity grok perplexity codebuddy kimi zhipu deepseek minimax opencode_go command_code composite"`
+	Name         string `json:"name" binding:"required"`
+	Description  string `json:"description"`
+	SystemPrompt string `json:"system_prompt" binding:"max=8192"`
+	Platform     string `json:"platform" binding:"omitempty,oneof=anthropic openai gemini antigravity grok perplexity codebuddy kimi zhipu deepseek minimax opencode_go command_code composite"`
 	// Kind 分组类型：channel（默认）渠道分组 / managed 管理分组；Category 仅管理分组使用。
 	Kind     string `json:"kind" binding:"omitempty,oneof=channel managed"`
 	Category string `json:"category" binding:"omitempty,oneof=enterprise team"`
@@ -264,9 +265,10 @@ type CreateGroupRequest struct {
 
 // UpdateGroupRequest represents update group request
 type UpdateGroupRequest struct {
-	Name        string  `json:"name"`
-	Description *string `json:"description"`
-	Platform    string  `json:"platform" binding:"omitempty,oneof=anthropic openai gemini antigravity grok perplexity codebuddy kimi zhipu deepseek minimax opencode_go command_code composite"`
+	Name         string  `json:"name"`
+	Description  *string `json:"description"`
+	SystemPrompt *string `json:"system_prompt" binding:"omitempty,max=8192"`
+	Platform     string  `json:"platform" binding:"omitempty,oneof=anthropic openai gemini antigravity grok perplexity codebuddy kimi zhipu deepseek minimax opencode_go command_code composite"`
 	// Kind 创建后不可修改，仅用于校验；Category 为 nil 表示不修改（由服务层校验取值）。
 	Kind                      string                         `json:"kind" binding:"omitempty,oneof=channel managed"`
 	Category                  *string                        `json:"category"`
@@ -677,6 +679,7 @@ func (h *GroupHandler) Create(c *gin.Context) {
 	group, err := h.adminService.CreateGroup(c.Request.Context(), &service.CreateGroupInput{
 		Name:                            req.Name,
 		Description:                     req.Description,
+		SystemPrompt:                    req.SystemPrompt,
 		Platform:                        req.Platform,
 		Kind:                            req.Kind,
 		Category:                        req.Category,
@@ -825,6 +828,7 @@ func (h *GroupHandler) Update(c *gin.Context) {
 	group, err := h.adminService.UpdateGroup(c.Request.Context(), groupID, &service.UpdateGroupInput{
 		Name:                            req.Name,
 		Description:                     req.Description,
+		SystemPrompt:                    req.SystemPrompt,
 		Platform:                        req.Platform,
 		Kind:                            req.Kind,
 		Category:                        req.Category,
