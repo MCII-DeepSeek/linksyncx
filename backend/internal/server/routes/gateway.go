@@ -497,6 +497,7 @@ func RegisterGatewayRoutes(
 
 	// Antigravity 模型列表
 	r.GET("/antigravity/models", gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, h.GroupManagement.GatewayGuard(middleware.AnthropicErrorWriter), h.Gateway.AntigravityModels)
+	r.GET("/antigravity/models/:model", gin.HandlerFunc(apiKeyAuth), requireGroupAnthropic, h.GroupManagement.GatewayGuard(middleware.AnthropicErrorWriter), h.Gateway.AntigravityModels)
 
 	// Antigravity 专用路由（仅使用 antigravity 账户，不混合调度）
 	antigravityV1 := r.Group("/antigravity/v1")
@@ -513,6 +514,7 @@ func RegisterGatewayRoutes(
 		antigravityV1.POST("/messages", h.Gateway.Messages)
 		antigravityV1.POST("/messages/count_tokens", h.Gateway.CountTokens)
 		antigravityV1.GET("/models", h.Gateway.AntigravityModels)
+		antigravityV1.GET("/models/:model", h.Gateway.AntigravityModels)
 		antigravityV1.GET("/usage", h.Gateway.Usage)
 	}
 

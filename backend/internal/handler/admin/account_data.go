@@ -505,6 +505,7 @@ func (h *AccountHandler) importData(ctx context.Context, req DataImportRequest) 
 			privacyAccounts = append(privacyAccounts, created)
 		}
 		h.scheduleGrokImportProbe(created)
+		h.scheduleAntigravityModelSync(created)
 		result.AccountCreated++
 		if clashUnbound {
 			result.AccountPausedForClash++

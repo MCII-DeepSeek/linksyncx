@@ -15,48 +15,91 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/gemini"
+	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 	"golang.org/x/sync/singleflight"
 )
 
-const antigravityModelsCacheTTL = 5 * time.Minute
+const (
+	// Align with OpenAI model discovery cache windows:
+	// - within 1m (fresh): return immediately without upstream traffic
+	// - 1m..5m (optimistic SWR): return cached list and refresh in background
+	// - >5m (expired): wait for live upstream refresh via singleflight
+	antigravityModelsFreshTTL      = 1 * time.Minute
+	antigravityModelsCacheTTL      = 5 * time.Minute
+	antigravityModelsRefreshWindow = 15 * time.Second
+)
 
-// antigravityModelsLoad, when set, replaces the live upstream fetch.
+// antigravityModelsLoader, when set, replaces the live upstream fetch.
 // Production leaves it nil. Tests use it to avoid calling Google.
 type antigravityModelsLoader func(ctx context.Context, account *Account) ([]antigravity.ClaudeModel, error)
 
 type antigravityModelsCacheEntry struct {
-	models    []antigravity.ClaudeModel
-	expiresAt time.Time
+	models     []antigravity.ClaudeModel
+	freshUntil time.Time
+	expiresAt  time.Time
 }
 
 type antigravityModelsCacheStore struct {
-	mu    sync.Mutex
-	items map[string]antigravityModelsCacheEntry
-	group singleflight.Group
+	mu           sync.Mutex
+	items        map[string]antigravityModelsCacheEntry
+	group        singleflight.Group
+	refreshGroup singleflight.Group
 }
 
 var antigravityModelsCache = &antigravityModelsCacheStore{
 	items: map[string]antigravityModelsCacheEntry{},
 }
 
-func (c *antigravityModelsCacheStore) get(key string, now time.Time) ([]antigravity.ClaudeModel, bool) {
+// antigravityRawModelsCache caches raw upstream models per account (independent of model_mapping)
+// so mapping edits and gateway discovery can re-project without hitting upstream again.
+var antigravityRawModelsCache = &antigravityModelsCacheStore{
+	items: map[string]antigravityModelsCacheEntry{},
+}
+
+type antigravityCacheLookupState int
+
+const (
+	antigravityCacheMiss antigravityCacheLookupState = iota
+	antigravityCacheStale
+	antigravityCacheFresh
+)
+
+func (c *antigravityModelsCacheStore) lookup(key string, now time.Time) ([]antigravity.ClaudeModel, antigravityCacheLookupState) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	entry, ok := c.items[key]
 	if !ok || !now.Before(entry.expiresAt) {
-		return nil, false
+		return nil, antigravityCacheMiss
 	}
-	return cloneAntigravityClaudeModels(entry.models), true
+	models := cloneAntigravityClaudeModels(entry.models)
+	if !entry.freshUntil.IsZero() && !now.Before(entry.freshUntil) {
+		return models, antigravityCacheStale
+	}
+	return models, antigravityCacheFresh
+}
+
+func (c *antigravityModelsCacheStore) get(key string, now time.Time) ([]antigravity.ClaudeModel, bool) {
+	models, state := c.lookup(key, now)
+	return models, state != antigravityCacheMiss
 }
 
 func (c *antigravityModelsCacheStore) set(key string, models []antigravity.ClaudeModel, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.items[key] = antigravityModelsCacheEntry{
-		models:    cloneAntigravityClaudeModels(models),
-		expiresAt: now.Add(antigravityModelsCacheTTL),
+		models:     cloneAntigravityClaudeModels(models),
+		freshUntil: now.Add(antigravityModelsFreshTTL),
+		expiresAt:  now.Add(antigravityModelsCacheTTL),
 	}
+}
+
+func (c *antigravityModelsCacheStore) clear() {
+	c.mu.Lock()
+	c.items = map[string]antigravityModelsCacheEntry{}
+	c.mu.Unlock()
 }
 
 func cloneAntigravityClaudeModels(models []antigravity.ClaudeModel) []antigravity.ClaudeModel {
@@ -68,18 +111,32 @@ func cloneAntigravityClaudeModels(models []antigravity.ClaudeModel) []antigravit
 	return out
 }
 
-// antigravityModelsCacheKey fingerprints the account without the access token.
-// A token refresh must not miss the cache; a mapping, base URL, or key change must.
-func antigravityModelsCacheKey(account *Account) string {
+func antigravityRawModelsCacheKey(account *Account) string {
+	if account == nil {
+		return ""
+	}
 	h := sha256.New()
-	_, _ = fmt.Fprintf(h, "%d\n%s\n%s\n%s\n",
+	var proxyID int64
+	if account.ProxyID != nil {
+		proxyID = *account.ProxyID
+	}
+	_, _ = fmt.Fprintf(h, "%d\n%s\n%s\n%s\n%d\n",
 		account.ID,
 		account.Type,
 		strings.TrimSpace(account.GetCredential("project_id")),
 		strings.TrimSpace(account.GetCredential("base_url")),
+		proxyID,
 	)
 	sum := sha256.Sum256([]byte(account.GetCredential("api_key")))
 	_, _ = h.Write(sum[:])
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// antigravityModelsCacheKey fingerprints the account without the access token.
+// A token refresh must not miss the cache; a mapping, base URL, or key change must.
+func antigravityModelsCacheKey(account *Account) string {
+	h := sha256.New()
+	_, _ = h.Write([]byte(antigravityRawModelsCacheKey(account)))
 	// Fingerprint the stored mapping only. GetModelMapping injects the
 	// default catalog, which would make an empty mapping look custom.
 	mapping := rawAntigravityModelMapping(account)
@@ -96,63 +153,175 @@ func antigravityModelsCacheKey(account *Account) string {
 }
 
 // FetchAntigravityAccountModels returns the account's public model aliases.
-// A live fetch error falls back to the static catalog and is not cached.
-// A successful fetch that projects to nothing stays empty.
+// Like OpenAI account discovery, fresh entries return immediately, optimistic stale
+// entries trigger a background refresh, and live fetch failures fall back to any
+// persisted account catalog snapshot before the static catalog without caching errors.
 func (s *AccountTestService) FetchAntigravityAccountModels(ctx context.Context, account *Account) ([]antigravity.ClaudeModel, error) {
 	if s == nil || account == nil {
 		return antigravity.DefaultModels(), nil
 	}
+	load := s.antigravityModelsLoad
+	isCustomLoader := load != nil
+	if load == nil {
+		load = s.loadAntigravityUpstreamModels
+	}
+	models, err := fetchCachedAntigravityProjectedModels(ctx, account, load, !isCustomLoader)
+	if err != nil {
+		slog.Warn("antigravity model discovery failed; using fallback catalog", "account_id", account.ID, "error", err)
+		if fallback, ok := fallbackAntigravityAccountModels(account); ok {
+			return fallback, nil
+		}
+		return antigravity.DefaultModels(), nil
+	}
+	return models, nil
+}
+
+func fallbackAntigravityAccountModels(account *Account) ([]antigravity.ClaudeModel, bool) {
+	if account == nil {
+		return nil, false
+	}
+	if snapshotModels, ok := account.AntigravitySnapshotClaudeModels(); ok {
+		return projectAntigravityAccountModels(snapshotModels, account), true
+	}
+	return nil, false
+}
+
+func fetchCachedAntigravityProjectedModels(
+	ctx context.Context,
+	account *Account,
+	load antigravityModelsLoader,
+	recordObserved bool,
+) ([]antigravity.ClaudeModel, error) {
+	if account == nil {
+		return nil, errors.New("account is required")
+	}
+	now := time.Now()
 	key := antigravityModelsCacheKey(account)
-	if cached, ok := antigravityModelsCache.get(key, time.Now()); ok {
+	if cached, state := antigravityModelsCache.lookup(key, now); state != antigravityCacheMiss {
+		if state == antigravityCacheStale {
+			accountCopy := *account
+			go func() {
+				refreshCtx, cancel := context.WithTimeout(context.Background(), antigravityModelsRefreshWindow)
+				defer cancel()
+				_, _, _ = antigravityModelsCache.refreshGroup.Do(key, func() (any, error) {
+					loaded, loadErr := load(refreshCtx, &accountCopy)
+					if loadErr != nil {
+						return nil, loadErr
+					}
+					if loaded == nil {
+						loaded = []antigravity.ClaudeModel{}
+					}
+					if recordObserved && accountCopy.ID > 0 {
+						recordAntigravityObservedClaudeModels(accountCopy.ID, loaded)
+						antigravityRawModelsCache.set(antigravityRawModelsCacheKey(&accountCopy), loaded, time.Now())
+					}
+					projected := projectAntigravityAccountModels(loaded, &accountCopy)
+					antigravityModelsCache.set(key, projected, time.Now())
+					return projected, nil
+				})
+			}()
+		}
 		return cached, nil
 	}
+
 	v, err, _ := antigravityModelsCache.group.Do(key, func() (any, error) {
 		if cached, ok := antigravityModelsCache.get(key, time.Now()); ok {
 			return cached, nil
 		}
-		load := s.antigravityModelsLoad
-		if load == nil {
-			load = s.loadAntigravityUpstreamModels
+		// Reuse unexpired raw cache when only model_mapping changed on the same account.
+		if recordObserved {
+			if rawCached, ok := antigravityRawModelsCache.get(antigravityRawModelsCacheKey(account), time.Now()); ok {
+				projected := projectAntigravityAccountModels(rawCached, account)
+				antigravityModelsCache.set(key, projected, time.Now())
+				return cloneAntigravityClaudeModels(projected), nil
+			}
 		}
 		loaded, loadErr := load(ctx, account)
 		if loadErr != nil {
-			slog.Warn("antigravity model discovery failed; using static catalog", "account_id", account.ID, "error", loadErr)
-			return antigravity.DefaultModels(), nil
+			return nil, loadErr
 		}
 		if loaded == nil {
 			loaded = []antigravity.ClaudeModel{}
+		}
+		if recordObserved && account.ID > 0 {
+			recordAntigravityObservedClaudeModels(account.ID, loaded)
+			antigravityRawModelsCache.set(antigravityRawModelsCacheKey(account), loaded, time.Now())
 		}
 		projected := projectAntigravityAccountModels(loaded, account)
 		antigravityModelsCache.set(key, projected, time.Now())
 		return cloneAntigravityClaudeModels(projected), nil
 	})
-	if err != nil || v == nil {
-		return antigravity.DefaultModels(), nil
+	if err != nil {
+		return nil, err
 	}
 	models, ok := v.([]antigravity.ClaudeModel)
 	if !ok || models == nil {
-		return antigravity.DefaultModels(), nil
+		return []antigravity.ClaudeModel{}, nil
 	}
 	return cloneAntigravityClaudeModels(models), nil
 }
 
+func invalidateAntigravityAccountModelsCache(account *Account, rawModels []antigravity.ClaudeModel) {
+	if account == nil {
+		return
+	}
+	now := time.Now()
+	if rawModels != nil {
+		if account.ID > 0 {
+			recordAntigravityObservedClaudeModels(account.ID, rawModels)
+		}
+		antigravityRawModelsCache.set(antigravityRawModelsCacheKey(account), rawModels, now)
+		projected := projectAntigravityAccountModels(rawModels, account)
+		antigravityModelsCache.set(antigravityModelsCacheKey(account), projected, now)
+	}
+}
+
 func (s *AccountTestService) loadAntigravityUpstreamModels(ctx context.Context, account *Account) ([]antigravity.ClaudeModel, error) {
+	return loadAntigravityUpstreamModelsCommon(
+		ctx,
+		account,
+		s.antigravityGatewayService,
+		s.httpUpstream,
+		s.cfg,
+		s.validateUpstreamBaseURL,
+		func(req *http.Request, proxyURL string, acc *Account) (*http.Response, error) {
+			return s.doUpstreamModelsRequest(req, proxyURL, acc)
+		},
+	)
+}
+
+func loadAntigravityUpstreamModelsCommon(
+	ctx context.Context,
+	account *Account,
+	gatewaySvc *AntigravityGatewayService,
+	httpUpstream HTTPUpstream,
+	cfg *config.Config,
+	validateBaseURL func(string) (string, error),
+	doRelay func(*http.Request, string, *Account) (*http.Response, error),
+) ([]antigravity.ClaudeModel, error) {
 	if account == nil {
 		return nil, errors.New("account is required")
 	}
 	// type=upstream keeps a third-party API key. It must use that key against
 	// the account's own base URL. Treating it as OAuth sends the key to Google.
 	if antigravityUsesRelayModelList(account) {
-		return s.loadAntigravityAPIKeyModels(ctx, account)
+		return loadAntigravityRelayModelsWithDeps(ctx, account, httpUpstream, cfg, validateBaseURL, doRelay)
 	}
-	return s.loadAntigravityOAuthModels(ctx, account)
+	return loadAntigravityOAuthModelsWithDeps(ctx, account, gatewaySvc, cfg)
 }
 
-func (s *AccountTestService) loadAntigravityAPIKeyModels(ctx context.Context, account *Account) ([]antigravity.ClaudeModel, error) {
-	if s == nil || s.httpUpstream == nil {
+func loadAntigravityRelayModelsWithDeps(
+	ctx context.Context,
+	account *Account,
+	httpUpstream HTTPUpstream,
+	cfg *config.Config,
+	validateBaseURL func(string) (string, error),
+	doRelay func(*http.Request, string, *Account) (*http.Response, error),
+) ([]antigravity.ClaudeModel, error) {
+	if httpUpstream == nil && doRelay == nil {
 		return nil, errors.New("upstream HTTP client is not configured")
 	}
-	req, err := s.buildAntigravityAPIKeyModelsRequest(ctx, account)
+	req, err := buildAntigravityRelayModelsRequest(ctx, account, validateBaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -160,12 +329,17 @@ func (s *AccountTestService) loadAntigravityAPIKeyModels(ctx context.Context, ac
 	if err != nil {
 		return nil, err
 	}
-	resp, err := s.doUpstreamModelsRequest(req, proxyURL, account)
+	var resp *http.Response
+	if doRelay != nil {
+		resp, err = doRelay(req, proxyURL, account)
+	} else {
+		resp, err = httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	}
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	bodyLimit := resolveModelsListReadLimit(s.cfg)
+	bodyLimit := resolveModelsListReadLimit(cfg)
 	body, err := io.ReadAll(io.LimitReader(resp.Body, bodyLimit+1))
 	if err != nil {
 		return nil, err
@@ -179,11 +353,16 @@ func (s *AccountTestService) loadAntigravityAPIKeyModels(ctx context.Context, ac
 	return parseAntigravityAPIKeyModels(body)
 }
 
-func (s *AccountTestService) loadAntigravityOAuthModels(ctx context.Context, account *Account) ([]antigravity.ClaudeModel, error) {
-	if s == nil || s.antigravityGatewayService == nil || s.antigravityGatewayService.GetTokenProvider() == nil {
+func loadAntigravityOAuthModelsWithDeps(
+	ctx context.Context,
+	account *Account,
+	gatewaySvc *AntigravityGatewayService,
+	cfg *config.Config,
+) ([]antigravity.ClaudeModel, error) {
+	if gatewaySvc == nil || gatewaySvc.GetTokenProvider() == nil {
 		return nil, errors.New("antigravity token provider is not configured")
 	}
-	accessToken, err := s.antigravityGatewayService.GetTokenProvider().GetAccessToken(ctx, account)
+	accessToken, err := gatewaySvc.GetTokenProvider().GetAccessToken(ctx, account)
 	if err != nil {
 		return nil, err
 	}
@@ -200,16 +379,270 @@ func (s *AccountTestService) loadAntigravityOAuthModels(ctx context.Context, acc
 	if err != nil {
 		return nil, err
 	}
+	projectID := strings.TrimSpace(account.GetCredential("project_id"))
+	if projectID == "" {
+		projectID = strings.TrimSpace(account.GetCredential(antigravityProjectIDFallbackCredentialKey))
+	}
+	if projectID == "" {
+		projectID = strings.TrimSpace(account.GetExtraString(antigravityProjectIDFallbackCredentialKey))
+	}
 	modelsResp, _, err := client.FetchAvailableModels(
 		ctx,
 		accessToken,
-		strings.TrimSpace(account.GetCredential("project_id")),
-		resolveModelsListReadLimit(s.cfg),
+		projectID,
+		resolveModelsListReadLimit(cfg),
 	)
 	if err != nil {
 		return nil, err
 	}
 	return claudeModelsFromAvailable(modelsResp), nil
+}
+
+func (s *AntigravityGatewayService) validateRelayBaseURL(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errors.New("empty base URL")
+	}
+	if s != nil && s.settingService != nil && s.settingService.cfg != nil && s.settingService.cfg.Security.URLAllowlist.Enabled {
+		return urlvalidator.ValidateHTTPSURL(raw, urlvalidator.ValidationOptions{
+			AllowedHosts:     s.settingService.cfg.Security.URLAllowlist.UpstreamHosts,
+			RequireAllowlist: true,
+			AllowPrivate:     s.settingService.cfg.Security.URLAllowlist.AllowPrivateHosts,
+		})
+	}
+	if s != nil && s.settingService != nil && s.settingService.cfg != nil && !s.settingService.cfg.Security.URLAllowlist.AllowInsecureHTTP {
+		return urlvalidator.ValidateHTTPSURL(raw, urlvalidator.ValidationOptions{
+			RequireAllowlist: false,
+			AllowPrivate:     s.settingService.cfg.Security.URLAllowlist.AllowPrivateHosts,
+		})
+	}
+	return urlvalidator.ValidateURLFormat(raw, true)
+}
+
+func (s *AntigravityGatewayService) gatewayConfig() *config.Config {
+	if s != nil && s.settingService != nil {
+		return s.settingService.cfg
+	}
+	return nil
+}
+
+// FetchAccountModels discovers a single Antigravity account's live upstream models
+// using the shared fresh/SWR singleflight cache and projects them through the account's mapping.
+func (s *AntigravityGatewayService) FetchAccountModels(ctx context.Context, account *Account) ([]antigravity.ClaudeModel, error) {
+	if s == nil {
+		return nil, errors.New("antigravity gateway service is not configured")
+	}
+	if account == nil {
+		return nil, errors.New("account is required")
+	}
+	return fetchCachedAntigravityProjectedModels(ctx, account, func(fetchCtx context.Context, acc *Account) ([]antigravity.ClaudeModel, error) {
+		return loadAntigravityUpstreamModelsCommon(
+			fetchCtx,
+			acc,
+			s,
+			s.httpUpstream,
+			s.gatewayConfig(),
+			s.validateRelayBaseURL,
+			nil,
+		)
+	}, true)
+}
+
+// FetchGroupModels discovers upstream Antigravity models for a group (or the global pool
+// when groupID is nil), mirroring OpenAI's scheduled upstream model discovery:
+//   - selects schedulable Antigravity accounts ordered by priority and fails over on error
+//   - merges public aliases from any sibling accounts with custom mappings or synced snapshots
+//   - falls back to persisted account catalog snapshots when live upstream calls fail
+func (s *AntigravityGatewayService) FetchGroupModels(
+	ctx context.Context,
+	groupID *int64,
+	requireMixed bool,
+	maxSwitches int,
+) ([]antigravity.ClaudeModel, *Account, bool) {
+	if s == nil || s.accountRepo == nil {
+		return nil, nil, false
+	}
+	var (
+		accounts []Account
+		err      error
+	)
+	if groupID != nil {
+		accounts, err = s.accountRepo.ListSchedulableByGroupID(ctx, *groupID)
+	} else {
+		accounts, err = s.accountRepo.ListSchedulable(ctx)
+	}
+	if err != nil || len(accounts) == 0 {
+		return nil, nil, false
+	}
+
+	candidates := make([]Account, 0, len(accounts))
+	for _, acc := range accounts {
+		if acc.Platform != PlatformAntigravity {
+			continue
+		}
+		if requireMixed && !acc.IsMixedSchedulingEnabled() {
+			continue
+		}
+		candidates = append(candidates, acc)
+	}
+	if len(candidates) == 0 {
+		return nil, nil, false
+	}
+
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Priority != candidates[j].Priority {
+			return candidates[i].Priority < candidates[j].Priority
+		}
+		return candidates[i].ID < candidates[j].ID
+	})
+
+	if maxSwitches <= 0 {
+		maxSwitches = 3
+	}
+
+	byID := make(map[string]antigravity.ClaudeModel)
+	addModels := func(items []antigravity.ClaudeModel) {
+		for _, item := range items {
+			id := strings.TrimSpace(item.ID)
+			if id == "" || strings.Contains(id, "*") {
+				continue
+			}
+			item.ID = id
+			if existing, exists := byID[id]; exists {
+				if (existing.DisplayName == "" || existing.DisplayName == id) && item.DisplayName != "" && item.DisplayName != id {
+					byID[id] = item
+				}
+				continue
+			}
+			if strings.TrimSpace(item.DisplayName) == "" {
+				item.DisplayName = id
+			}
+			if strings.TrimSpace(item.Type) == "" {
+				item.Type = "model"
+			}
+			byID[id] = item
+		}
+	}
+
+	var primaryAccount *Account
+	attempts := 0
+	for i := range candidates {
+		if ctx.Err() != nil {
+			break
+		}
+		acc := &candidates[i]
+		// If primary already succeeded, only query additional accounts from warm cache,
+		// persisted snapshots, or explicit custom mappings to avoid fanout storms.
+		if primaryAccount != nil {
+			if cached, ok := antigravityModelsCache.get(antigravityModelsCacheKey(acc), time.Now()); ok {
+				addModels(cached)
+				continue
+			}
+			if snapModels, ok := fallbackAntigravityAccountModels(acc); ok {
+				addModels(snapModels)
+				continue
+			}
+			for alias := range rawAntigravityModelMapping(acc) {
+				alias = strings.TrimSpace(alias)
+				if alias != "" && !strings.Contains(alias, "*") {
+					addModels([]antigravity.ClaudeModel{{ID: alias, Type: "model", DisplayName: alias}})
+				}
+			}
+			continue
+		}
+
+		if attempts > maxSwitches {
+			break
+		}
+		attempts++
+		models, fetchErr := s.FetchAccountModels(ctx, acc)
+		if fetchErr != nil {
+			slog.Warn("antigravity group model discovery failover", "account_id", acc.ID, "error", fetchErr)
+			continue
+		}
+		primaryAccount = acc
+		addModels(models)
+	}
+
+	if primaryAccount == nil {
+		// All live upstream attempts failed: try persisted account snapshots or explicit custom mappings.
+		hadSnapshot := false
+		for i := range candidates {
+			acc := &candidates[i]
+			if snapModels, ok := fallbackAntigravityAccountModels(acc); ok {
+				addModels(snapModels)
+				hadSnapshot = true
+				continue
+			}
+			raw := rawAntigravityModelMapping(acc)
+			if len(raw) > 0 {
+				hadSnapshot = true
+				for alias := range raw {
+					alias = strings.TrimSpace(alias)
+					if alias != "" && !strings.Contains(alias, "*") {
+						addModels([]antigravity.ClaudeModel{{ID: alias, Type: "model", DisplayName: alias}})
+					}
+				}
+			}
+		}
+		if !hadSnapshot {
+			return nil, nil, false
+		}
+	}
+
+	out := make([]antigravity.ClaudeModel, 0, len(byID))
+	for _, model := range byID {
+		out = append(out, model)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out, primaryAccount, true
+}
+
+// FetchGroupGeminiModels discovers Gemini-family models served by Antigravity accounts
+// for /antigravity/v1beta/models and mixed Gemini /v1beta/models endpoints.
+func (s *AntigravityGatewayService) FetchGroupGeminiModels(
+	ctx context.Context,
+	groupID *int64,
+	requireMixed bool,
+	maxSwitches int,
+) ([]gemini.Model, bool) {
+	claudeModels, _, ok := s.FetchGroupModels(ctx, groupID, requireMixed, maxSwitches)
+	if !ok {
+		return nil, false
+	}
+	methods := []string{"generateContent", "streamGenerateContent"}
+	byName := make(map[string]gemini.Model)
+	addGemini := func(id, display string) {
+		id = strings.TrimSpace(strings.TrimPrefix(id, "models/"))
+		if !isAntigravityGeminiModel(id) || strings.Contains(id, "*") {
+			return
+		}
+		name := "models/" + id
+		if _, exists := byName[name]; exists {
+			return
+		}
+		byName[name] = gemini.Model{
+			Name:                       name,
+			DisplayName:                strings.TrimSpace(display),
+			SupportedGenerationMethods: methods,
+		}
+	}
+	for _, m := range claudeModels {
+		addGemini(m.ID, m.DisplayName)
+		if bare, hasBare := bareGeminiModelFromThinkingVariant(m.ID); hasBare {
+			addGemini(bare, bare)
+		}
+	}
+	names := make([]string, 0, len(byName))
+	for name := range byName {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make([]gemini.Model, 0, len(names))
+	for _, name := range names {
+		out = append(out, byName[name])
+	}
+	return out, true
 }
 
 func parseAntigravityAPIKeyModels(body []byte) ([]antigravity.ClaudeModel, error) {
@@ -240,6 +673,7 @@ func parseAntigravityAPIKeyModels(body []byte) ([]antigravity.ClaudeModel, error
 		if id == "" {
 			id = strings.TrimSpace(entry.Name)
 		}
+		id = strings.TrimPrefix(id, "models/")
 		if id == "" {
 			continue
 		}

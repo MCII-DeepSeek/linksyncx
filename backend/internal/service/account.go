@@ -595,6 +595,9 @@ func stringMappingFromRaw(raw any) map[string]string {
 
 func (a *Account) GetModelMapping() map[string]string {
 	runtimeVersion := xai.RuntimeModelMappingVersion()
+	if a.Platform == domain.PlatformAntigravity {
+		runtimeVersion ^= antigravityRuntimeMappingSignature(a)
+	}
 	credentialsPtr := mapPtr(a.Credentials)
 	rawMapping, _ := a.Credentials["model_mapping"].(map[string]any)
 	rawPtr := mapPtr(rawMapping)
@@ -632,9 +635,9 @@ func (a *Account) GetModelMapping() map[string]string {
 
 func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]string {
 	if a.Credentials == nil {
-		// Antigravity 平台使用默认映射
+		// Antigravity 平台使用默认映射并叠加已同步的上游新模型
 		if a.Platform == domain.PlatformAntigravity {
-			return domain.DefaultAntigravityModelMapping
+			return mergeAntigravityObservedModelsIntoMapping(domain.DefaultAntigravityModelMapping, a)
 		}
 		if a.Platform == domain.PlatformGrok {
 			return a.grokDefaultModelMapping()
@@ -646,9 +649,9 @@ func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]stri
 		if a.IsGeminiGoogleOne() {
 			return geminicli.GoogleOneModelMapping()
 		}
-		// Antigravity 平台使用默认映射
+		// Antigravity 平台使用默认映射并叠加已同步的上游新模型
 		if a.Platform == domain.PlatformAntigravity {
-			return domain.DefaultAntigravityModelMapping
+			return mergeAntigravityObservedModelsIntoMapping(domain.DefaultAntigravityModelMapping, a)
 		}
 		if a.Platform == domain.PlatformGrok {
 			return a.grokDefaultModelMapping()
@@ -707,7 +710,7 @@ func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]stri
 		return geminicli.GoogleOneModelMapping()
 	}
 	if a.Platform == domain.PlatformAntigravity {
-		return domain.DefaultAntigravityModelMapping
+		return mergeAntigravityObservedModelsIntoMapping(domain.DefaultAntigravityModelMapping, a)
 	}
 	if a.Platform == domain.PlatformGrok {
 		return a.grokDefaultModelMapping()

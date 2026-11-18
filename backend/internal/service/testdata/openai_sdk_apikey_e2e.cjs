@@ -1,6 +1,6 @@
 // Drives the official OpenAI Node SDK against the gateway test server started
 // by TestOpenAINodeSDKAgainstAPIKeyAccount (an OpenAI API-key / relay account).
-// Usage: node openai_sdk_apikey_e2e.cjs <sdkDir> <baseURL>
+// Usage: node openai_sdk_apikey_e2e.cjs <sdkDir> <relayBaseURL> <officialBaseURL>
 const OpenAI = require(process.argv[2]);
 const toFile = OpenAI.toFile || require(process.argv[2] + '/uploads').toFile;
 
@@ -42,6 +42,65 @@ async function run(name, fn) {
     });
     return { count: res.data.length, b64: res.data[0].b64_json, size: res.size };
   });
+
+  const collect = async (stream) => {
+    const types = [];
+    let last = {};
+    for await (const event of stream) {
+      types.push(event.type);
+      last = event;
+    }
+    return { types: types.join(','), b64: last.b64_json, usage: last.usage };
+  };
+
+  await run('images_stream_26', async () => collect(await client.images.generate({
+    model: 'gpt-image-2.6-flare',
+    prompt: 'case=img_stream a red apple, pixel art',
+    size: '1024x1024',
+    quality: 'low',
+    stream: true,
+    partial_images: 2,
+  })));
+
+  await run('images_edit_stream_26', async () => collect(await client.images.edit({
+    model: 'gpt-image-2.6-sunburst',
+    image: await toFile(Buffer.from(PNG, 'base64'), 'ref.png', { type: 'image/png' }),
+    prompt: 'case=img_edit_stream make the apple blue',
+    stream: true,
+    partial_images: 1,
+  })));
+
+  await run('images_relay_response_format', async () => {
+    const res = await client.images.generate({ model: 'gpt-image-2.6-flare', prompt: 'case=img_relay_format apple', response_format: 'b64_json' });
+    return { b64: res.data[0].b64_json };
+  });
+
+  // The second gateway server routes to an API-key account without base_url,
+  // i.e. the official API, which rejects response_format for GPT Image models.
+  const official = new OpenAI({ apiKey: 'sk-test', baseURL: process.argv[4], maxRetries: 0, timeout: 20000 });
+
+  await run('images_official_url', async () => {
+    const res = await official.images.generate({ model: 'gpt-image-2.6-flare', prompt: 'case=img_official_url apple', response_format: 'url' });
+    return { url: res.data[0].url, b64: res.data[0].b64_json };
+  });
+
+  await run('images_official_edit_b64', async () => {
+    const res = await official.images.edit({
+      model: 'gpt-image-2.6-flare',
+      image: await toFile(Buffer.from(PNG, 'base64'), 'ref.png', { type: 'image/png' }),
+      prompt: 'case=img_official_edit make it blue',
+      response_format: 'b64_json',
+    });
+    return { b64: res.data[0].b64_json };
+  });
+
+  await run('images_official_stream', async () => collect(await official.images.generate({
+    model: 'gpt-image-2.6-flare',
+    prompt: 'case=img_official_stream apple',
+    response_format: 'b64_json',
+    stream: true,
+    partial_images: 1,
+  })));
 
   await run('responses_retrieve_delete', async () => {
     const first = await client.responses.create({ model: 'gpt-5.4', input: 'case=apikey_first remember 7' });

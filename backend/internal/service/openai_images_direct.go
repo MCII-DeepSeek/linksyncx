@@ -239,16 +239,7 @@ func (s *OpenAIGatewayService) handleCodexDirectImagesNonStreamingResponse(resp 
 		}
 	}
 	if parsed.ResponseFormat == "url" {
-		for i, item := range gjson.GetBytes(body, "data").Array() {
-			format := item.Get("output_format").String()
-			if format == "" {
-				format = gjson.GetBytes(body, "output_format").String()
-			}
-			if format == "" {
-				format = parsed.OutputFormat
-			}
-			body = codexDirectImageURL(body, fmt.Sprintf("data.%d.", i), format)
-		}
+		body = openAIImagesB64ToDataURLs(body, parsed.OutputFormat)
 	}
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
 	contentType := "application/json"

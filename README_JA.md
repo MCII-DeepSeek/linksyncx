@@ -12,7 +12,7 @@
 
 <a href="https://trendshift.io/repositories/21823" target="_blank"><img src="https://trendshift.io/api/badge/repositories/21823" alt="Wei-Shaw%2Fsub2api | Trendshift" width="250" height="55"/></a>
 
-**サブスクリプションクォータ配分のための AI API ゲートウェイプラットフォーム**
+**本番環境対応の統合 AI API ゲートウェイ · マルチプロバイダーのクォータ制御・課金基盤**
 
 [English](README.md) | [中文](README_CN.md) | 日本語
 
@@ -174,19 +174,16 @@
 
 ## 概要
 
-Sub2API は、AI 製品のサブスクリプションから API クォータを配分・管理するために設計された AI API ゲートウェイプラットフォームです。ユーザーはプラットフォームが生成した API キーを通じて上流の AI サービスにアクセスでき、プラットフォームは認証、課金、負荷分散、リクエスト転送を処理します。
+Sub2API（LinkSyncX カスタム拡張版）は、本番環境向けに設計された高可用性 AI API 統合ゲートウェイおよびクォータオーケストレーション基盤です。複数プロバイダーの AI サブスクリプション（OAuth / セッション認証）とネイティブ API キーを弾力的なアカウントプールへと集約し、単一のプラットフォーム API キーを通じて**プロトコル変換、スマート負荷分散、スティッキーセッション、上流モデルカタログの動的同期、トークン単位の精密課金、プロンプト監査、セルフサービス決済**を一元的に提供します。
 
 ## 機能
 
-- **マルチアカウント管理** - 複数の上流アカウントタイプ（OAuth、APIキー）をサポート
-- **APIキー配布** - ユーザー向けの APIキーの生成と管理
-- **精密な課金** - トークンレベルの使用量追跡とコスト計算
-- **スマートスケジューリング** - スティッキーセッション付きのインテリジェントなアカウント選択
-- **同時実行制御** - ユーザーごと・アカウントごとの同時実行数制限
-- **レート制限** - 設定可能なリクエスト数およびトークンレート制限
-- **内蔵決済システム** - EasyPay、Alipay、WeChat Pay、Stripe に対応。ユーザーのセルフサービスチャージが可能で、別途決済サービスのデプロイは不要（[設定ガイド](docs/PAYMENT.md)）
-- **管理ダッシュボード** - 監視・管理のための Web インターフェース
-- **外部システム連携** - 外部システム（チケット管理など）を iframe 経由で管理ダッシュボードに埋め込み可能
+- **マルチプロバイダー・マルチプロトコル統合** — Anthropic Messages、OpenAI Chat Completions / Stateful Responses（WebSocket リアルタイム通信および Codex CLI マニフェスト対応）、Google Gemini `v1beta`、MCP プロトコルにネイティブ対応。**Claude**（OAuth / Setup-Token / API Key / Bedrock / Vertex）、**OpenAI**（Codex OAuth / Agent Identity / API Key / GPT Image）、**Gemini**、**Antigravity**（Cloud Code OAuth・中継チャネル、Claude + Gemini デュアルスタック）、**xAI Grok**（Grok Build / Realtime 音声 / Imagine 画像・動画）、**Perplexity**（Sonar 検索 & MCP）、**CodeBuddy**、**DeepSeek / Zhipu GLM / Kimi / MiniMax** をシームレスに接続。
+- **上流モデルカタログのリアルタイム同期** — OpenAI、Antigravity、Perplexity、CodeBuddy、Grok アカウントの利用可能モデルと機能メタデータを自動検出・ワンクリック同期。Fresh / SWR キャッシュと自動フェイルオーバーにより、最新モデルを即座に公開。
+- **スマートスケジューリング & コンポジットルーティング** — 優先度・負荷係数・健全性スコアに基づく最適アカウント選択、スティッキーセッション保持（Sticky Hold）、モデル単位のレート制限回避を実装。単一グループ内でモデルごとに最適なプロバイダーへ振り分ける**コンポジットグループ（Composite Groups）**に対応（[運用ガイド](docs/COMPOSITE_GROUPS.md)）。
+- **通信経路分離 & リスク制御** — **Clash プロキシプール**（1アカウント1出口の専有バインド・遅延計測）、アカウント別 **TLS フィンガープリント**、**デバイスプロファイル**擬装を内蔵し、Fail-Closed 原則でオリジン IP の漏洩を防止。
+- **精密な課金・ガードレール・セキュリティ監査** — トークン単位のリアルタイム課金（キャッシュ読書き、推論ティア、長文脈、画像・動画生成、上流課金倍率の自動プローブ）、ユーザー／アカウント二層の同時実行・レート制御、モデル許可リスト、および OpenAI 互換の**プロンプト入力セキュリティ監査**を提供。
+- **内蔵決済システム & 運用可観測性** — EasyPay、Alipay、WeChat Pay、Stripe、Airwallex によるセルフサービスチャージ・サブスクリプション（[設定ガイド](docs/PAYMENT.md)）、引き換えコード、アフィリエイト還元を統合。マルチビューのチャネル監視（V1–V3）、モデルプラザ、ワンクリックオンライン更新、外部システムの iframe 連携を搭載。
 
 ## エコシステム
 

@@ -3126,11 +3126,12 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 
 	s.sendEvent(c, TestEvent{Type: "test_start", Model: modelID})
 
+	// GPT Image models always answer with b64_json, and the official API rejects
+	// response_format for them as an unknown parameter.
 	payload := map[string]any{
-		"model":           modelID,
-		"prompt":          prompt,
-		"n":               1,
-		"response_format": "b64_json",
+		"model":  modelID,
+		"prompt": prompt,
+		"n":      1,
 	}
 	payloadBytes, _ := json.Marshal(payload)
 
@@ -3166,10 +3167,11 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 		return s.sendErrorAndEnd(c, fmt.Sprintf("API returned %d: %s", resp.StatusCode, string(body)))
 	}
 
-	// Parse {"data": [{"b64_json": "...", "revised_prompt": "..."}]}
+	// Parse {"data": [{"b64_json": "...", "revised_prompt": "..."}]}; relays may answer with url instead.
 	var result struct {
 		Data []struct {
 			B64JSON       string `json:"b64_json"`
+			URL           string `json:"url"`
 			RevisedPrompt string `json:"revised_prompt"`
 		} `json:"data"`
 	}
@@ -3191,6 +3193,8 @@ func (s *AccountTestService) testOpenAIImageAPIKey(c *gin.Context, ctx context.C
 				ImageURL: "data:image/png;base64," + item.B64JSON,
 				MimeType: "image/png",
 			})
+		} else if item.URL != "" {
+			s.sendEvent(c, TestEvent{Type: "image", ImageURL: item.URL})
 		}
 	}
 

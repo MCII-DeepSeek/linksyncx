@@ -1,0 +1,137 @@
+package handler
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/gemini"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
+	"github.com/Wei-Shaw/sub2api/internal/server/middleware"
+	"github.com/Wei-Shaw/sub2api/internal/service"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
+)
+
+type antigravityHandlerModelsUpstream struct {
+	body string
+}
+
+func (u *antigravityHandlerModelsUpstream) Do(_ *http.Request, _ string, _ int64, _ int) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(u.body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func (u *antigravityHandlerModelsUpstream) DoWithTLS(req *http.Request, proxyURL string, accountID int64, accountConcurrency int, _ *tlsfingerprint.Profile) (*http.Response, error) {
+	return u.Do(req, proxyURL, accountID, accountConcurrency)
+}
+
+func TestGatewayAntigravityModels_SyncsLiveUpstreamAndSupportsSingleModelRetrieve(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	groupID := int64(88)
+	repo := &gatewayModelsAccountRepoStub{
+		byGroup: map[int64][]service.Account{
+			groupID: {
+				{
+					ID:          501,
+					Platform:    service.PlatformAntigravity,
+					Type:        service.AccountTypeUpstream,
+					Status:      service.StatusActive,
+					Schedulable: true,
+					Credentials: map[string]any{
+						"base_url": "https://relay.antigravity.example",
+						"api_key":  "secret-key",
+					},
+				},
+			},
+		},
+	}
+	upstream := &antigravityHandlerModelsUpstream{
+		body: `{"data":[{"id":"gemini-4-carbon-high","display_name":"Gemini 4 Carbon (High)"},{"id":"claude-opus-5-6","display_name":"Claude Opus 5.6"}]}`,
+	}
+	agSvc := service.NewAntigravityGatewayService(repo, nil, nil, nil, nil, upstream, nil, nil)
+	h := &GatewayHandler{
+		antigravityGatewayService: agSvc,
+		maxAccountSwitches:        3,
+		maxAccountSwitchesGemini:  3,
+	}
+
+	// 1. /antigravity/v1/models returns live upstream models
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodGet, "/antigravity/v1/models", nil)
+	c.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+		GroupID: &groupID,
+		Group:   &service.Group{ID: groupID, Platform: service.PlatformAntigravity},
+	})
+	h.AntigravityModels(c)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var listResp struct {
+		Object string                    `json:"object"`
+		Data   []antigravity.ClaudeModel `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &listResp))
+	require.Equal(t, "list", listResp.Object)
+	require.Len(t, listResp.Data, 2)
+	require.Equal(t, "claude-opus-5-6", listResp.Data[0].ID)
+	require.Equal(t, "Claude Opus 5.6", listResp.Data[0].DisplayName)
+	require.Equal(t, "gemini-4-carbon-high", listResp.Data[1].ID)
+
+	// 2. /v1/models on an Antigravity group also uses live upstream discovery
+	recV1 := httptest.NewRecorder()
+	cV1, _ := gin.CreateTestContext(recV1)
+	cV1.Request = httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	cV1.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+		GroupID: &groupID,
+		Group:   &service.Group{ID: groupID, Platform: service.PlatformAntigravity},
+	})
+	h.Models(cV1)
+	require.Equal(t, http.StatusOK, recV1.Code)
+	require.Contains(t, recV1.Body.String(), "gemini-4-carbon-high")
+
+	// 3. Single model retrieve (/antigravity/v1/models/:model)
+	recOne := httptest.NewRecorder()
+	cOne, _ := gin.CreateTestContext(recOne)
+	cOne.Request = httptest.NewRequest(http.MethodGet, "/antigravity/v1/models/gemini-4-carbon-high", nil)
+	cOne.Params = gin.Params{{Key: "model", Value: "gemini-4-carbon-high"}}
+	cOne.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+		GroupID: &groupID,
+		Group:   &service.Group{ID: groupID, Platform: service.PlatformAntigravity},
+	})
+	h.AntigravityModels(cOne)
+	require.Equal(t, http.StatusOK, recOne.Code)
+	var single antigravity.ClaudeModel
+	require.NoError(t, json.Unmarshal(recOne.Body.Bytes(), &single))
+	require.Equal(t, "gemini-4-carbon-high", single.ID)
+	require.Equal(t, "Gemini 4 Carbon (High)", single.DisplayName)
+
+	// 4. /antigravity/v1beta/models syncs Gemini models and exports bare thinking name
+	recBeta := httptest.NewRecorder()
+	cBeta, _ := gin.CreateTestContext(recBeta)
+	cBeta.Request = httptest.NewRequest(http.MethodGet, "/antigravity/v1beta/models", nil)
+	cBeta.Set(string(middleware.ContextKeyForcePlatform), service.PlatformAntigravity)
+	cBeta.Set(string(middleware.ContextKeyAPIKey), &service.APIKey{
+		GroupID: &groupID,
+		Group:   &service.Group{ID: groupID, Platform: service.PlatformAntigravity},
+	})
+	h.GeminiV1BetaListModels(cBeta)
+	require.Equal(t, http.StatusOK, recBeta.Code)
+	var betaResp gemini.ModelsListResponse
+	require.NoError(t, json.Unmarshal(recBeta.Body.Bytes(), &betaResp))
+	names := make([]string, 0, len(betaResp.Models))
+	for _, gm := range betaResp.Models {
+		names = append(names, gm.Name)
+	}
+	require.Contains(t, names, "models/gemini-4-carbon-high")
+	require.Contains(t, names, "models/gemini-4-carbon")
+	require.NotContains(t, names, "models/claude-opus-5-6")
+}

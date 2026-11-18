@@ -1186,6 +1186,11 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 		return
 	}
 
+	if platform == service.PlatformAntigravity && h.antigravityGatewayService != nil {
+		h.AntigravityModels(c)
+		return
+	}
+
 	if platform == service.PlatformComposite {
 		availableModels := h.compositeAvailableModels(c.Request.Context(), groupID)
 		if apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
@@ -1225,6 +1230,10 @@ func (h *GatewayHandler) Models(c *gin.Context) {
 
 	if platform == service.PlatformGemini {
 		writeModelsListResponse(c, geminicli.DefaultModels)
+		return
+	}
+	if platform == service.PlatformAntigravity {
+		writeModelsListResponse(c, antigravity.DefaultModels())
 		return
 	}
 	if platform == service.PlatformGrok {
@@ -1554,12 +1563,54 @@ func mergeModelIDs(primary, secondary []string) []string {
 	return merged
 }
 
-// AntigravityModels 返回 Antigravity 支持的全部模型
-// GET /antigravity/models
+// AntigravityModels 动态同步并返回 Antigravity 账号上游支持的模型列表（不可达时回退已同步快照或静态目录）
+// GET /antigravity/models, /antigravity/models/:model, /antigravity/v1/models, /antigravity/v1/models/:model
 // 分组级模型白名单开启时按白名单过滤。
 func (h *GatewayHandler) AntigravityModels(c *gin.Context) {
-	models := antigravity.DefaultModels()
-	if apiKey, ok := middleware2.GetAPIKeyFromContext(c); ok && apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
+	if c.Request.Context().Err() != nil {
+		return
+	}
+
+	apiKey, _ := middleware2.GetAPIKeyFromContext(c)
+	var groupID *int64
+	if apiKey != nil {
+		if apiKey.Group != nil {
+			groupID = &apiKey.Group.ID
+		} else if apiKey.GroupID != nil {
+			groupID = apiKey.GroupID
+		}
+	}
+
+	var (
+		models          []antigravity.ClaudeModel
+		selectedAccount *service.Account
+		discovered      bool
+	)
+	if h != nil && h.antigravityGatewayService != nil {
+		models, selectedAccount, discovered = h.antigravityGatewayService.FetchGroupModels(
+			c.Request.Context(),
+			groupID,
+			false,
+			h.maxAccountSwitches,
+		)
+	}
+	if selectedAccount != nil {
+		setOpsSelectedAccount(c, selectedAccount.ID, selectedAccount.Platform)
+	}
+
+	if !discovered {
+		if h != nil && h.gatewayService != nil {
+			if availableIDs := h.gatewayService.GetAvailableModels(c.Request.Context(), groupID, service.PlatformAntigravity); len(availableIDs) > 0 {
+				models = antigravityClaudeModelsFromIDs(availableIDs)
+				discovered = true
+			}
+		}
+	}
+	if !discovered {
+		models = antigravity.DefaultModels()
+	}
+
+	if apiKey != nil && apiKey.Group != nil && apiKey.Group.ModelAllowlistEnabled() {
 		filtered := make([]antigravity.ClaudeModel, 0, len(models))
 		for _, model := range models {
 			if apiKey.Group.ModelAllowlist.Allows(model.ID) {
@@ -1568,10 +1619,33 @@ func (h *GatewayHandler) AntigravityModels(c *gin.Context) {
 		}
 		models = filtered
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"object": "list",
-		"data":   models,
-	})
+	writeModelsListResponse(c, models)
+}
+
+func antigravityClaudeModelsFromIDs(modelIDs []string) []antigravity.ClaudeModel {
+	defaults := antigravity.DefaultModels()
+	defaultByID := make(map[string]antigravity.ClaudeModel, len(defaults))
+	for _, m := range defaults {
+		defaultByID[m.ID] = m
+	}
+	out := make([]antigravity.ClaudeModel, 0, len(modelIDs))
+	for _, id := range modelIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		if dm, ok := defaultByID[id]; ok {
+			out = append(out, dm)
+			continue
+		}
+		out = append(out, antigravity.ClaudeModel{
+			ID:          id,
+			Type:        "model",
+			DisplayName: id,
+			CreatedAt:   "2024-01-01T00:00:00Z",
+		})
+	}
+	return out
 }
 
 func cloneAPIKeyWithGroup(apiKey *service.APIKey, group *service.Group) *service.APIKey {

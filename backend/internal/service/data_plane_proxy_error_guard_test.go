@@ -111,6 +111,8 @@ var rawProxyErrorHelpers = map[string]string{
 	"sendPerplexityAuthenticated":        "数据面调用方 sendPerplexityCCUpstreamRequest 先查绑定，发送错误交给 handleOpenAIUpstreamTransportError；上传授权前同一请求已查过绑定；其余调用方是探测 / 模型发现",
 	"getVertexServiceAccountAccessToken": "取 token 步骤：Anthropic 入口先查绑定，取 token 的错误再经 handleAccessTokenTransportError 兜底；Gemini 入口先查绑定再取 token；批量生图是异步任务，没有换号循环",
 	"registerAgentIdentityTask":          "Agent Identity 取凭证步骤：普通账号的转发入口已先查同一绑定；影子账号用父账号的绑定，父账号绑定失效时仍是终态（取凭证阶段的遗留问题，与 main 一致）",
+	"loadAntigravityRelayModelsWithDeps": "Antigravity 中转模型列表发现，不是转发：分组发现循环 FetchGroupModels 遇到任何错误自动换下一个账号，管理端同步/测试原样报告错误",
+	"loadAntigravityOAuthModelsWithDeps": "Antigravity OAuth 模型列表发现，不是转发：分组发现循环 FetchGroupModels 遇到任何错误自动换下一个账号，管理端同步/测试原样报告错误",
 }
 
 func TestDataPlaneProxyErrorsAreConvertedToFailover(t *testing.T) {

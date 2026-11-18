@@ -13,7 +13,7 @@ FROM ${POSTGRES_IMAGE} AS pg-client
 FROM ${ALPINE_IMAGE}
 
 LABEL maintainer="LinkSyncX <github.com/LinkSyncX>"
-LABEL description="LinkSyncX - customized Sub2API gateway"
+LABEL description="LinkSyncX - Unified Multi-Provider AI API Gateway & Quota Orchestration Platform"
 LABEL org.opencontainers.image.source="https://github.com/LinkSyncX/linksyncx"
 
 # Install runtime dependencies

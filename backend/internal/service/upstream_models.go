@@ -228,6 +228,12 @@ func (s *AccountTestService) SyncUpstreamModelCatalog(ctx context.Context, accou
 		}
 		return s.syncPerplexityModelCatalog(ctx, account, models, body, observedAt)
 	}
+	if account != nil && account.Platform == PlatformAntigravity {
+		if err != nil {
+			return nil, err
+		}
+		return s.syncAntigravityModelCatalog(ctx, account, models, body, observedAt)
+	}
 	liveListAvailable := err == nil
 	if err != nil {
 		configuredModels := configuredUpstreamModelsForCapabilitySync(account)
@@ -1011,6 +1017,14 @@ func (s *AccountTestService) buildAnthropicUpstreamModelsRequest(ctx context.Con
 }
 
 func (s *AccountTestService) buildAntigravityAPIKeyModelsRequest(ctx context.Context, account *Account) (*http.Request, error) {
+	return buildAntigravityRelayModelsRequest(ctx, account, s.validateUpstreamBaseURL)
+}
+
+func buildAntigravityRelayModelsRequest(
+	ctx context.Context,
+	account *Account,
+	validateBaseURL func(string) (string, error),
+) (*http.Request, error) {
 	if account == nil || !antigravityUsesRelayModelList(account) {
 		accountType := ""
 		if account != nil {
@@ -1029,9 +1043,12 @@ func (s *AccountTestService) buildAntigravityAPIKeyModelsRequest(ctx context.Con
 	if err != nil {
 		return nil, err
 	}
-	normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
-	if err != nil {
-		return nil, newUpstreamModelSyncConfigError("Invalid Antigravity base URL", err)
+	normalizedBaseURL := baseURL
+	if validateBaseURL != nil {
+		normalizedBaseURL, err = validateBaseURL(baseURL)
+		if err != nil {
+			return nil, newUpstreamModelSyncConfigError("Invalid Antigravity base URL", err)
+		}
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, buildV1ModelsURL(normalizedBaseURL), nil)
@@ -1278,10 +1295,17 @@ func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Con
 	if err != nil {
 		return nil, nil, newUpstreamModelSyncConfigError("Failed to configure Antigravity client", err)
 	}
+	projectID := strings.TrimSpace(account.GetCredential("project_id"))
+	if projectID == "" {
+		projectID = strings.TrimSpace(account.GetCredential(antigravityProjectIDFallbackCredentialKey))
+	}
+	if projectID == "" {
+		projectID = strings.TrimSpace(account.GetExtraString(antigravityProjectIDFallbackCredentialKey))
+	}
 	modelsResp, _, err := client.FetchAvailableModels(
 		ctx,
 		accessToken,
-		strings.TrimSpace(account.GetCredential("project_id")),
+		projectID,
 		resolveModelsListReadLimit(s.cfg),
 	)
 	if err != nil {
@@ -1300,6 +1324,84 @@ func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Con
 		return nil, nil, newUpstreamModelSyncUpstreamError("Failed to encode Antigravity model catalog", err)
 	}
 	return dedupeAndSortModelIDs(models), body, nil
+}
+
+func (s *AccountTestService) syncAntigravityModelCatalog(
+	ctx context.Context,
+	account *Account,
+	models []string,
+	body []byte,
+	observedAt time.Time,
+) (*UpstreamModelCatalog, error) {
+	metadata := make(map[string]UpstreamModelMetadata)
+	if len(body) > 0 {
+		if _, directMetadata, parseErr := extractUpstreamModelCatalog(body, false); parseErr == nil && directMetadata != nil {
+			metadata = directMetadata
+		}
+	}
+
+	var claudeModels []antigravity.ClaudeModel
+	if len(body) > 0 {
+		if parsed, parseErr := parseAntigravityAPIKeyModels(body); parseErr == nil {
+			claudeModels = parsed
+		}
+	}
+	if len(claudeModels) == 0 {
+		claudeModels = make([]antigravity.ClaudeModel, 0, len(models))
+		for _, id := range models {
+			id = strings.TrimSpace(id)
+			if id == "" {
+				continue
+			}
+			display := id
+			if entry, ok := metadata[id]; ok && strings.TrimSpace(entry.DisplayName) != "" {
+				display = strings.TrimSpace(entry.DisplayName)
+			}
+			claudeModels = append(claudeModels, antigravity.ClaudeModel{
+				ID:          id,
+				Type:        "model",
+				DisplayName: display,
+			})
+		}
+	}
+
+	snapshot := buildAntigravityCatalogSnapshotFromRelayModels(claudeModels, metadata)
+	if account != nil && !antigravityUsesRelayModelList(account) {
+		snapshot.Source = "antigravity_oauth"
+	}
+	snapshot.SyncedAt = observedAt.Format(time.RFC3339)
+	if len(body) > 0 {
+		var envelope struct {
+			DeprecatedModelIDs map[string]string `json:"deprecated_model_ids"`
+		}
+		if json.Unmarshal(body, &envelope) == nil && len(envelope.DeprecatedModelIDs) > 0 {
+			snapshot.DeprecatedModelIDs = envelope.DeprecatedModelIDs
+		}
+	}
+
+	if account != nil && account.ID > 0 && s.accountRepo != nil && len(snapshot.Models) > 0 {
+		extraUpdates := map[string]any{
+			AntigravityModelCatalogExtraKey: snapshot,
+		}
+		if complete := completeUpstreamModelMetadataSubset(capabilitySyncModelIDs(models), metadata); len(complete) > 0 {
+			extraUpdates[UpstreamModelMetadataExtraKey] = UpstreamModelMetadataSnapshot{
+				Source:   snapshot.Source,
+				SyncedAt: snapshot.SyncedAt,
+				Models:   complete,
+			}
+		}
+		if err := s.accountRepo.UpdateExtra(ctx, account.ID, extraUpdates); err != nil {
+			return nil, newUpstreamModelSyncInternalError("Failed to save Antigravity model catalog", err)
+		}
+		account.SetAntigravityModelCatalogSnapshot(snapshot)
+	}
+	if account != nil {
+		invalidateAntigravityAccountModelsCache(account, claudeModels)
+	}
+	return &UpstreamModelCatalog{
+		Models:   models,
+		Metadata: metadata,
+	}, nil
 }
 
 func synthesizeAntigravityCatalogBody(resp *antigravity.FetchAvailableModelsResponse) ([]byte, error) {
@@ -1343,7 +1445,21 @@ func synthesizeAntigravityCatalogBody(resp *antigravity.FetchAvailableModelsResp
 		}
 		data = append(data, item)
 	}
-	return json.Marshal(map[string]any{"data": data})
+	payload := map[string]any{"data": data}
+	if len(resp.DeprecatedModelIDs) > 0 {
+		deprecated := make(map[string]string, len(resp.DeprecatedModelIDs))
+		for oldID, dep := range resp.DeprecatedModelIDs {
+			oldTrimmed := strings.TrimSpace(oldID)
+			newTrimmed := strings.TrimSpace(dep.NewModelID)
+			if oldTrimmed != "" && newTrimmed != "" {
+				deprecated[oldTrimmed] = newTrimmed
+			}
+		}
+		if len(deprecated) > 0 {
+			payload["deprecated_model_ids"] = deprecated
+		}
+	}
+	return json.Marshal(payload)
 }
 
 func (s *AccountTestService) doUpstreamModelsRequest(req *http.Request, proxyURL string, account *Account) (*http.Response, error) {

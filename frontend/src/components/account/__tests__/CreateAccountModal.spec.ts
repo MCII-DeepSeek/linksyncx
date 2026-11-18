@@ -822,6 +822,17 @@ describe('CreateAccountModal OpenAI long-context billing', () => {
         .map((candidate) => (candidate.element as HTMLInputElement).value)
     expect(values('admin.accounts.requestModel')).toEqual(['claude-opus-4-8', 'gemini-3.5-flash'])
     expect(values('admin.accounts.actualModel')).toEqual(['claude-opus-4-8', 'gemini-3.5-flash'])
+
+    // 支持一键清空映射或切换到白名单模式提交
+    await wrapper.get('[data-testid="antigravity-mode-whitelist"]').trigger('click')
+    await flushPromises()
+    expect(wrapper.findComponent(ModelWhitelistSelectorStub).exists()).toBe(true)
+
+    await wrapper.get('[data-testid="antigravity-mode-mapping"]').trigger('click')
+    await flushPromises()
+    await wrapper.get('[data-testid="antigravity-clear-mappings"]').trigger('click')
+    await flushPromises()
+    expect(values('admin.accounts.requestModel')).toEqual([])
   })
 
   it('leaves Codex session import billing ownership to the backend', async () => {

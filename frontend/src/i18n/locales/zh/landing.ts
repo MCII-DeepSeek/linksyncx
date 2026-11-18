@@ -1,7 +1,7 @@
 export default {
   batchImageGuide: {
     title: '图片批量生成',
-    description: '一次提交多条提示词，任务完成后可统一下载图片结果'
+    description: '支持一次性批量提交多组提示词，任务完成后一键打包下载全部生成图像'
   },
   // Home Page
   home: {
@@ -15,98 +15,98 @@ export default {
     getStarted: '立即开始',
     goToDashboard: '进入控制台',
     // 新增：面向用户的价值主张
-    heroSubtitle: '一个密钥，畅用多个 AI 模型',
-    heroDescription: '无需管理多个订阅账号，一站式接入 Claude、GPT、Gemini 等主流 AI 服务',
+    heroSubtitle: '一枚密钥，畅联全球前沿大模型',
+    heroDescription: '告别繁琐的多平台订阅与密钥管理，一站式无缝接入 Claude、OpenAI、Gemini、Antigravity、Grok 等主流 AI 服务',
     tags: {
-      subscriptionToApi: '订阅转 API',
-      stickySession: '会话保持',
-      realtimeBilling: '按量计费'
+      subscriptionToApi: '订阅转标准 API',
+      stickySession: '智能会话保持',
+      realtimeBilling: 'Token 级按量计费'
     },
     // 用户痛点区块
     painPoints: {
-      title: '你是否也遇到这些问题？',
+      title: '多平台 AI 接入，是否正面临这些困扰？',
       items: {
         expensive: {
-          title: '订阅费用高',
-          desc: '每个 AI 服务都要单独订阅，每月支出越来越多'
+          title: '固定订阅成本高昂',
+          desc: '各家模型需分别开通月度订阅，额度闲置浪费，综合开支居高不下'
         },
         complex: {
-          title: '多账号难管理',
-          desc: '不同平台的账号、密钥分散各处，管理起来很麻烦'
+          title: '多源凭证管理繁杂',
+          desc: '不同厂商的账号、协议与 API Key 分散各处，开发接入与维护成本高'
         },
         unstable: {
-          title: '服务不稳定',
-          desc: '单一账号容易触发限制，影响正常使用'
+          title: '单号并发易触发限流',
+          desc: '单一订阅账号频繁遭遇速率限制与额度触顶，核心工作流频频中断'
         },
         noControl: {
-          title: '用量无法控制',
-          desc: '不知道钱花在哪了，也无法限制团队成员的使用'
+          title: '团队用量缺乏管控',
+          desc: '难以追踪各模型与成员的真实消耗，缺乏细粒度的预算与速率边界'
         }
       }
     },
     // 解决方案区块
     solutions: {
-      title: '我们帮你解决',
-      subtitle: '简单三步，开始省心使用 AI'
+      title: '一站式企业级 AI 网关方案',
+      subtitle: '简单三步，开启稳定、高效、可控的模型调用体验'
     },
     features: {
-      unifiedGateway: '一键接入',
-      unifiedGatewayDesc: '获取一个 API 密钥，即可调用所有已接入的 AI 模型，无需分别申请。',
-      multiAccount: '稳定可靠',
-      multiAccountDesc: '智能调度多个上游账号，自动切换和负载均衡，告别频繁报错。',
-      balanceQuota: '用多少付多少',
-      balanceQuotaDesc: '按实际使用量计费，支持设置配额上限，团队用量一目了然。'
+      unifiedGateway: '统一入口，即插即用',
+      unifiedGatewayDesc: '凭一枚标准 API Key 即可跨协议调用全平台前沿模型，无缝兼容 Claude Code、Codex、Gemini CLI 等主流开发工具。',
+      multiAccount: '集群调度，稳如磐石',
+      multiAccountDesc: '智能编排多账号池，支持粘性会话保持、负载均衡与毫秒级自动故障切换，从容应对高并发生产流量。',
+      balanceQuota: '精细计量，透明可控',
+      balanceQuotaDesc: '精确至 Token 级的实时账单与缓存核算，支持灵活设定配额上限、速率规则与模型白名单，团队支出清晰可查。'
     },
     // 优势对比
     comparison: {
       title: '为什么选择我们？',
       headers: {
-        feature: '对比项',
-        official: '官方订阅',
-        us: '本平台'
+        feature: '对比维度',
+        official: '传统官方订阅',
+        us: '本网关平台'
       },
       items: {
         pricing: {
-          feature: '付费方式',
-          official: '固定月费，用不完也付',
-          us: '按量付费，用多少付多少'
+          feature: '计费模式',
+          official: '固定包月，额度闲置仍需付费',
+          us: '按实际用量计费，灵活经济'
         },
         models: {
-          feature: '模型选择',
-          official: '单一服务商',
-          us: '多模型随意切换'
+          feature: '模型生态',
+          official: '绑定单一厂商生态',
+          us: '主流前沿模型自由切换'
         },
         management: {
-          feature: '账号管理',
-          official: '每个服务单独管理',
-          us: '统一密钥，一站管理'
+          feature: '凭证管理',
+          official: '多平台账号与密钥各自维护',
+          us: '一枚密钥统一鉴权，集中管控'
         },
         stability: {
-          feature: '服务稳定性',
-          official: '单账号易触发限制',
-          us: '多账号池，自动切换'
+          feature: '高可用保障',
+          official: '单账号易触发频率与额度限制',
+          us: '号池智能路由，故障无感切换'
         },
         control: {
-          feature: '用量控制',
-          official: '无法限制',
-          us: '可设配额、查明细'
+          feature: '预算与风控',
+          official: '缺乏细粒度配额与审计能力',
+          us: '多维限额管控，逐笔调用可溯'
         }
       }
     },
     providers: {
-      title: '已支持的 AI 模型',
-      description: '一个 API，多种选择',
+      title: '全栈覆盖主流 AI 模型生态',
+      description: '统一标准接口，自由连接全球顶尖模型能力',
       supported: '已支持',
-      soon: '即将推出',
+      soon: '持续扩展',
       claude: 'Claude',
       gemini: 'Gemini',
       antigravity: 'Antigravity',
-      more: '更多'
+      more: '更多生态'
     },
     // CTA 区块
     cta: {
-      title: '准备好开始了吗？',
-      description: '注册即可获得免费试用额度，体验一站式 AI 服务',
+      title: '即刻开启高效 AI 接入体验',
+      description: '快速创建账户，使用统一 API Key 畅享稳定、低延迟的多模型网关服务',
       button: '免费注册'
     },
     footer: {
@@ -117,11 +117,11 @@ export default {
   // Key Usage Query Page
   keyUsage: {
     title: 'API Key 用量查询',
-    subtitle: '输入您的 API Key 以查看实时消费金额与使用状态',
+    subtitle: '输入您的 API Key，实时洞察额度余量、Token 消耗与逐日消费明细',
     placeholder: 'sk-ant-mirror-xxxxxxxxxxxx',
     query: '查询',
     querying: '查询中...',
-    privacyNote: '您的 Key 仅在浏览器本地处理，不会被存储',
+    privacyNote: '安全承诺：您的密钥仅在当前浏览器本地发起查询，不会被第三方存储',
     dateRange: '统计范围:',
     dateRangeToday: '今日',
     dateRange7d: '7 天',

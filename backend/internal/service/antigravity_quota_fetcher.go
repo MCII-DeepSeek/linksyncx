@@ -85,6 +85,9 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 		return nil, err
 	}
 
+	// 同步刷新账号实时上游模型观测与缓存，使配额探测同时完成模型目录同步
+	recordAntigravityAvailableModelsFromQuota(account, modelsResp)
+
 	// 调用 LoadCodeAssist 获取订阅等级和 AI Credits 余额（非关键路径，失败不影响主流程）
 	tierRaw, tierNormalized, loadResp := f.fetchSubscriptionTier(ctx, client, accessToken)
 

@@ -1138,6 +1138,7 @@ func (h *AccountHandler) Create(c *gin.Context) {
 	// 探测失败不影响账号创建响应。
 	h.scheduleOpenAIResponsesProbe(createdAccount)
 	h.scheduleGrokImportProbe(createdAccount)
+	h.scheduleAntigravityModelSync(createdAccount)
 	response.Success(c, result.Data)
 }
 
@@ -1282,6 +1283,32 @@ func (h *AccountHandler) scheduleOpenAIResponsesProbe(account *service.Account) 
 			}
 		}()
 		h.accountTestService.ProbeOpenAIAPIKeyResponsesSupport(context.Background(), accountID)
+	}()
+}
+
+func (h *AccountHandler) scheduleAntigravityModelSync(account *service.Account) {
+	if account == nil || account.ID <= 0 || account.Platform != service.PlatformAntigravity {
+		return
+	}
+	if h.accountTestService == nil || h.adminService == nil {
+		return
+	}
+	accountID := account.ID
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("antigravity_model_sync_panic", "account_id", accountID, "recover", r)
+			}
+		}()
+		bgCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		freshAccount, err := h.adminService.GetAccount(bgCtx, accountID)
+		if err != nil || freshAccount == nil {
+			return
+		}
+		if _, syncErr := h.accountTestService.SyncUpstreamModelCatalog(bgCtx, freshAccount); syncErr != nil {
+			slog.Debug("antigravity_auto_model_sync_skipped", "account_id", accountID, "error", syncErr)
+		}
 	}()
 }
 
@@ -1604,8 +1631,9 @@ func (h *AccountHandler) refreshSingleAccount(ctx context.Context, account *serv
 
 	// OpenAI OAuth: 刷新成功后检查并设置 privacy_mode
 	h.adminService.EnsureOpenAIPrivacy(ctx, updatedAccount)
-	// Antigravity OAuth: 刷新成功后检查并设置 privacy_mode
+	// Antigravity OAuth: 刷新成功后检查并设置 privacy_mode，并异步同步最新上游模型目录
 	h.adminService.EnsureAntigravityPrivacy(ctx, updatedAccount)
+	h.scheduleAntigravityModelSync(updatedAccount)
 
 	return updatedAccount, "", nil
 }

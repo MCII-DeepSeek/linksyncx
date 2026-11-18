@@ -12,7 +12,7 @@
 
 <a href="https://trendshift.io/repositories/21823" target="_blank"><img src="https://trendshift.io/api/badge/repositories/21823" alt="Wei-Shaw%2Fsub2api | Trendshift" width="250" height="55"/></a>
 
-**AI API 网关平台 - 订阅配额分发管理**
+**新一代企业级 AI API 统一网关 · 多平台订阅配额调度与精细化运营平台**
 
 [English](README.md) | 中文 | [日本語](README_JA.md)
 
@@ -175,19 +175,16 @@
 
 ## 项目概述
 
-Sub2API 是一个 AI API 网关平台，用于分发和管理 AI 产品订阅的 API 配额。用户通过平台生成的 API Key 调用上游 AI 服务，平台负责鉴权、计费、负载均衡和请求转发。
+Sub2API（LinkSyncX 增强定制版）是一款面向生产环境的高可用 AI API 统一网关与配额调度平台。它将分散于多平台的 AI 订阅账号（OAuth / 会话凭证）与原生 API Key 汇聚为弹性共享池，对外签发标准统一的平台 API Key，一站式承载**多协议无损桥接、智能负载均衡、粘性会话路由、上游模型动态同步、Token 级实时清算、风控审计与自助商业化运营**。
 
 ## 核心功能
 
-- **多账号管理** - 支持多种上游账号类型（OAuth、API Key）
-- **API Key 分发** - 为用户生成和管理 API Key
-- **精确计费** - Token 级别的用量追踪和成本计算
-- **智能调度** - 智能账号选择，支持粘性会话
-- **并发控制** - 用户级和账号级并发限制
-- **速率限制** - 可配置的请求和 Token 速率限制
-- **内置支付系统** - 支持 EasyPay 易支付、支付宝官方、微信官方、Stripe，用户自助充值，无需独立部署支付服务（[配置指南](docs/PAYMENT_CN.md)）
-- **管理后台** - Web 界面进行监控和管理
-- **外部系统集成** - 支持通过 iframe 嵌入外部系统（如工单等），扩展管理后台功能
+- **全景多平台与多协议接入** — 原生兼容 Anthropic Messages、OpenAI Chat Completions / Stateful Responses（含 WebSocket 实时链路与 Codex CLI Manifest）、Google Gemini `v1beta` 及 MCP 协议；无缝汇聚 **Claude**（OAuth / Setup-Token / API Key / Bedrock / Vertex）、**OpenAI**（Codex OAuth / Agent Identity / API Key / GPT Image）、**Gemini**、**Antigravity**（Cloud Code OAuth 与中转渠道，支持 Claude + Gemini 双栈）、**xAI Grok**（含 Grok Build、Realtime 语音、Imagine 图像与视频）、**Perplexity**（Sonar 联网搜索与 MCP）、**CodeBuddy** 以及 **DeepSeek / 智谱 GLM / Kimi / MiniMax** 等主流服务。
+- **上游模型目录实时同步** — 支持 OpenAI、Antigravity、Perplexity、CodeBuddy、Grok 等账号自动探测或一键同步上游可用模型及能力元数据；网关模型列表端点内置新鲜缓存、后台异步刷新（SWR）与故障自动换号，零手工维护即可感知上游新发模型。
+- **智能调度与合成路由分组** — 基于优先级、负载因子与健康评分动态选路，支持粘性会话保持（Sticky Session / Sticky Hold）、模型级限流避让与毫秒级无感故障转移（Failover）；支持**合成路由分组（Composite Groups）**，在单一分组内按请求模型自动分发至最优底层供应商（[配置指南](docs/COMPOSITE_GROUPS.md)）。
+- **链路环境隔离与反风控保护** — 内置 **Clash 代理池**（支持一号一出口独占绑定与统一延迟探测）、账号级 **TLS 指纹画像** 与 **设备画像（Device Profile）** 模拟；全链路贯彻代理失效即熔断（Fail-Closed）机制，严防真实源站 IP 泄漏。
+- **精细化计量、风控与安全审计** — 提供 Token 级实时计费（覆盖缓存创建/读取、推理档位、长上下文、多模态生成与上游账单倍率探测），配备用户/账号双层并发与速率限制、分组模型白名单、利润护栏，以及 OpenAI 兼容 **Prompt 输入安全审计与拦截守卫**。
+- **自助商业闭环与可观测运维** — 内置易支付（EasyPay）、支付宝官方、微信支付、Stripe、Airwallex 多渠道自助充值与订阅套餐体系（[支付配置指南](docs/PAYMENT_CN.md)），支持兑换码、优惠码与推广返佣（Affiliate）；提供多视图实时渠道健康监控（V1–V3）、模型广场（Model Plaza）、管理后台一键热更新及外部系统 iframe 集成。
 
 ## 生态项目
 

@@ -1481,12 +1481,56 @@
       </div>
 
       <!-- Antigravity model restriction (applies to all antigravity types) -->
-      <!-- Antigravity 只支持模型映射模式，不支持白名单模式 -->
       <div v-if="account.platform === 'antigravity'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
 
-        <!-- Mapping Mode Only (no toggle for Antigravity) -->
-        <div>
+        <!-- Mode Toggle (Whitelist / Mapping, aligned with OpenAI) -->
+        <div class="mb-4 flex gap-2">
+          <button
+            type="button"
+            data-testid="edit-antigravity-mode-whitelist"
+            @click="switchAntigravityRestrictionMode('whitelist')"
+            :class="[
+              'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+              antigravityModelRestrictionMode === 'whitelist'
+                ? 'bg-primary-100 text-primary-700 dark:bg-primary-900/30 dark:text-primary-400'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
+            ]"
+          >
+            {{ t('admin.accounts.modelWhitelist') }}
+          </button>
+          <button
+            type="button"
+            data-testid="edit-antigravity-mode-mapping"
+            @click="switchAntigravityRestrictionMode('mapping')"
+            :class="[
+              'flex-1 rounded-lg px-4 py-2 text-sm font-medium transition-all',
+              antigravityModelRestrictionMode === 'mapping'
+                ? 'bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200 dark:bg-dark-600 dark:text-gray-400 dark:hover:bg-dark-500'
+            ]"
+          >
+            {{ t('admin.accounts.modelMapping') }}
+          </button>
+        </div>
+
+        <!-- Whitelist Mode -->
+        <div v-if="antigravityModelRestrictionMode === 'whitelist'">
+          <ModelWhitelistSelector
+            v-model="antigravityWhitelistModels"
+            platform="antigravity"
+            :account-id="account?.id"
+          />
+          <p class="text-xs text-gray-500 dark:text-gray-400">
+            {{ t('admin.accounts.selectedModels', { count: antigravityWhitelistModels.length }) }}
+            <span v-if="antigravityWhitelistModels.length === 0 && antigravityModelMappings.length === 0">{{
+              t('admin.accounts.supportsAllModels')
+            }}</span>
+          </p>
+        </div>
+
+        <!-- Mapping Mode -->
+        <div v-else>
           <div class="mb-3 rounded-lg bg-purple-50 p-3 dark:bg-purple-900/20">
             <p class="text-xs text-purple-700 dark:text-purple-400">{{ t('admin.accounts.mapRequestModels') }}</p>
           </div>
@@ -1499,6 +1543,15 @@
               class="rounded-lg border border-emerald-200 px-3 py-1.5 text-sm text-emerald-600 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-emerald-800 dark:text-emerald-400 dark:hover:bg-emerald-900/30"
             >
               {{ isSyncingAntigravityUpstream ? t('admin.accounts.syncUpstreamModelsLoading') : t('admin.accounts.syncUpstreamModels') }}
+            </button>
+            <button
+              v-if="antigravityModelMappings.length > 0"
+              type="button"
+              data-testid="edit-antigravity-clear-mappings"
+              @click="clearAntigravityModelMappings"
+              class="rounded-lg border border-red-200 px-3 py-1.5 text-sm text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-900/30"
+            >
+              {{ t('admin.accounts.clearAllModels') }}
             </button>
           </div>
 
@@ -4005,7 +4058,7 @@ const readUpstreamRequestIdHeader = (extra: unknown): string => {
 }
 const allowOverages = ref(false) // For antigravity accounts: enable AI Credits overages
 const antigravityProjectId = ref('')
-const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('whitelist')
+const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('mapping')
 const antigravityWhitelistModels = ref<string[]>([])
 const antigravityModelMappings = ref<ModelMapping[]>([])
 const isSyncingAntigravityUpstream = ref(false)
@@ -5001,6 +5054,25 @@ const removeOpenAICompactModelMapping = (index: number) => {
 
 const removeAntigravityModelMapping = (index: number) => {
   antigravityModelMappings.value.splice(index, 1)
+}
+
+const clearAntigravityModelMappings = () => {
+  antigravityModelMappings.value = []
+}
+
+const switchAntigravityRestrictionMode = (mode: 'whitelist' | 'mapping') => {
+  if (antigravityModelRestrictionMode.value === mode) return
+  if (mode === 'whitelist' && antigravityWhitelistModels.value.length === 0 && antigravityModelMappings.value.length > 0) {
+    const passthrough = antigravityModelMappings.value
+      .filter((m) => m.from.trim() !== '' && m.from.trim() === m.to.trim() && !m.from.includes('*'))
+      .map((m) => m.from.trim())
+    if (passthrough.length === antigravityModelMappings.value.length) {
+      antigravityWhitelistModels.value = Array.from(new Set(passthrough))
+    }
+  } else if (mode === 'mapping' && antigravityModelMappings.value.length === 0 && antigravityWhitelistModels.value.length > 0) {
+    antigravityModelMappings.value = antigravityWhitelistModels.value.map((m) => ({ from: m, to: m }))
+  }
+  antigravityModelRestrictionMode.value = mode
 }
 
 const addAntigravityPresetMapping = (from: string, to: string) => {
@@ -6003,10 +6075,10 @@ const handleSubmit = async () => {
       delete newCredentials.model_whitelist
       delete newCredentials.model_mapping
 
-      // 只使用映射模式
+      // 支持白名单模式与映射模式
       const antigravityModelMapping = buildModelMappingObject(
-        'mapping',
-        [],
+        antigravityModelRestrictionMode.value,
+        antigravityWhitelistModels.value,
         antigravityModelMappings.value
       )
       if (antigravityModelMapping) {

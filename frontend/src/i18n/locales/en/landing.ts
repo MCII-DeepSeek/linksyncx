@@ -1,7 +1,7 @@
 export default {
   batchImageGuide: {
     title: 'Batch Image Generation',
-    description: 'Submit multiple prompts in one job and download the generated images when complete'
+    description: 'Submit multiple prompts in a single batch job and download all generated images in one click'
   },
   // Home Page
   home: {
@@ -15,98 +15,98 @@ export default {
     getStarted: 'Get Started',
     goToDashboard: 'Go to Dashboard',
     // User-focused value proposition
-    heroSubtitle: 'One Key, All AI Models',
-    heroDescription: 'No need to manage multiple subscriptions. Access Claude, GPT, Gemini and more with a single API key',
+    heroSubtitle: 'One Unified Key for Frontier AI Models',
+    heroDescription: 'Eliminate fragmented subscriptions and scattered credentials. Connect to Claude, OpenAI, Gemini, Antigravity, Grok, and more through one unified gateway',
     tags: {
-      subscriptionToApi: 'Subscription to API',
-      stickySession: 'Session Persistence',
-      realtimeBilling: 'Pay As You Go'
+      subscriptionToApi: 'Subscription to Standard API',
+      stickySession: 'Smart Session Affinity',
+      realtimeBilling: 'Token-Accurate Billing'
     },
     // Pain points section
     painPoints: {
-      title: 'Sound Familiar?',
+      title: 'Scaling Across AI Providers Shouldn’t Be Hard',
       items: {
         expensive: {
-          title: 'High Subscription Costs',
-          desc: 'Paying for multiple AI subscriptions that add up every month'
+          title: 'Idle Subscription Spend',
+          desc: 'Paying fixed monthly fees across multiple providers even when quotas sit unused'
         },
         complex: {
-          title: 'Account Chaos',
-          desc: 'Managing scattered accounts and API keys across different platforms'
+          title: 'Fragmented Credentials',
+          desc: 'Juggling disparate accounts, SDKs, and API keys across incompatible vendor endpoints'
         },
         unstable: {
-          title: 'Service Interruptions',
-          desc: 'Single accounts hitting rate limits and disrupting your workflow'
+          title: 'Single-Account Bottlenecks',
+          desc: 'Individual accounts hit rate limits or cooldown windows, stalling critical workflows'
         },
         noControl: {
-          title: 'No Usage Control',
-          desc: "Can't track where your money goes or limit team member usage"
+          title: 'Limited Cost Visibility',
+          desc: 'Lack of granular token attribution, rate guardrails, and per-member quota controls'
         }
       }
     },
     // Solutions section
     solutions: {
-      title: 'We Solve These Problems',
-      subtitle: 'Three simple steps to stress-free AI access'
+      title: 'Enterprise-Ready Unified AI Gateway',
+      subtitle: 'Three streamlined pillars for reliable, cost-controlled model access'
     },
     features: {
-      unifiedGateway: 'One-Click Access',
-      unifiedGatewayDesc: 'Get a single API key to call all connected AI models. No separate applications needed.',
-      multiAccount: 'Always Reliable',
-      multiAccountDesc: 'Smart routing across multiple upstream accounts with automatic failover. Say goodbye to errors.',
-      balanceQuota: 'Pay What You Use',
-      balanceQuotaDesc: 'Usage-based billing with quota limits. Full visibility into team consumption.'
+      unifiedGateway: 'Drop-In Unified Endpoint',
+      unifiedGatewayDesc: 'Issue a single standard API Key to invoke frontier models across protocols—natively compatible with Claude Code, Codex, and Gemini CLI.',
+      multiAccount: 'Resilient Pool Orchestration',
+      multiAccountDesc: 'Priority- and health-aware load balancing with sticky sessions and automatic failover keeps high-concurrency workloads running smoothly.',
+      balanceQuota: 'Granular Metering & Guardrails',
+      balanceQuotaDesc: 'Real-time token and cache accounting with configurable spend caps, rate limits, and model allowlists for complete team visibility.'
     },
     // Comparison section
     comparison: {
-      title: 'Why Choose Us?',
+      title: 'Why Choose Our Gateway?',
       headers: {
-        feature: 'Comparison',
-        official: 'Official Subscriptions',
-        us: 'Our Platform'
+        feature: 'Dimension',
+        official: 'Direct Subscriptions',
+        us: 'Unified Gateway'
       },
       items: {
         pricing: {
-          feature: 'Pricing',
-          official: 'Fixed monthly fee, pay even if unused',
-          us: 'Pay only for what you use'
+          feature: 'Billing Model',
+          official: 'Fixed monthly fee regardless of usage',
+          us: 'Pay-as-you-go with exact token metering'
         },
         models: {
-          feature: 'Model Selection',
-          official: 'Single provider only',
-          us: 'Switch between models freely'
+          feature: 'Model Ecosystem',
+          official: 'Locked into a single vendor',
+          us: 'Switch seamlessly across frontier providers'
         },
         management: {
-          feature: 'Account Management',
-          official: 'Manage each service separately',
-          us: 'Unified key, one dashboard'
+          feature: 'Credential Governance',
+          official: 'Separate keys and consoles per service',
+          us: 'Single API key with centralized governance'
         },
         stability: {
-          feature: 'Stability',
-          official: 'Single account rate limits',
-          us: 'Multi-account pool, auto-failover'
+          feature: 'High Availability',
+          official: 'Vulnerable to single-account rate limits',
+          us: 'Multi-account pooling with instant failover'
         },
         control: {
-          feature: 'Usage Control',
-          official: 'Not available',
-          us: 'Quotas & detailed analytics'
+          feature: 'Cost & Risk Control',
+          official: 'Coarse or unavailable team limits',
+          us: 'Fine-grained quotas & request-level audit logs'
         }
       }
     },
     providers: {
-      title: 'Supported AI Models',
-      description: 'One API, Multiple Choices',
+      title: 'Comprehensive Frontier Model Coverage',
+      description: 'One standardized interface, connected to leading AI ecosystems',
       supported: 'Supported',
-      soon: 'Soon',
+      soon: 'Expanding',
       claude: 'Claude',
       gemini: 'Gemini',
       antigravity: 'Antigravity',
-      more: 'More'
+      more: 'More Providers'
     },
     // CTA section
     cta: {
-      title: 'Ready to Get Started?',
-      description: 'Sign up now and get free trial credits to experience seamless AI access',
+      title: 'Ready to Streamline Your AI Stack?',
+      description: 'Create an account in seconds and experience resilient, low-latency multi-model access with a single API Key',
       button: 'Sign Up Free'
     },
     footer: {
@@ -117,11 +117,11 @@ export default {
   // Key Usage Query Page
   keyUsage: {
     title: 'API Key Usage',
-    subtitle: 'Enter your API Key to view real-time spending and usage status',
+    subtitle: 'Enter your API Key to inspect real-time quota balance, token consumption, and daily cost breakdowns',
     placeholder: 'sk-ant-mirror-xxxxxxxxxxxx',
     query: 'Query',
     querying: 'Querying...',
-    privacyNote: 'Your Key is processed locally in the browser and will not be stored',
+    privacyNote: 'Privacy Notice: Your API Key is queried directly from your browser and is never stored by third parties',
     dateRange: 'Date Range:',
     dateRangeToday: 'Today',
     dateRange7d: '7 Days',

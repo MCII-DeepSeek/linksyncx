@@ -60,14 +60,23 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 		return filtered
 	}
 
-	agModelIDs, err := h.geminiCompatService.AntigravityGeminiModelIDs(c.Request.Context(), apiKey.GroupID, forcePlatform != service.PlatformAntigravity)
-	if err != nil {
-		googleError(c, http.StatusServiceUnavailable, "Unable to list Antigravity models")
-		return
+	requireMixed := forcePlatform != service.PlatformAntigravity
+	var agModels []gemini.Model
+	if h.antigravityGatewayService != nil {
+		if liveModels, ok := h.antigravityGatewayService.FetchGroupGeminiModels(c.Request.Context(), apiKey.GroupID, requireMixed, h.maxAccountSwitchesGemini); ok {
+			agModels = liveModels
+		}
 	}
-	agModels := make([]gemini.Model, 0, len(agModelIDs))
-	for _, id := range agModelIDs {
-		agModels = append(agModels, gemini.FallbackModel(id))
+	if len(agModels) == 0 && h.geminiCompatService != nil {
+		agModelIDs, err := h.geminiCompatService.AntigravityGeminiModelIDs(c.Request.Context(), apiKey.GroupID, requireMixed)
+		if err != nil {
+			googleError(c, http.StatusServiceUnavailable, "Unable to list Antigravity models")
+			return
+		}
+		agModels = make([]gemini.Model, 0, len(agModelIDs))
+		for _, id := range agModelIDs {
+			agModels = append(agModels, gemini.FallbackModel(id))
+		}
 	}
 	if forcePlatform == service.PlatformAntigravity {
 		c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(agModels)})

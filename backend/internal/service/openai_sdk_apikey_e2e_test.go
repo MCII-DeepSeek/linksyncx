@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -34,7 +35,8 @@ const apiKeyE2EPNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42m
 // openAIPlatformStub stands in for an OpenAI-compatible upstream behind an
 // API-key account: it stores Responses (previous_response_id, retrieve,
 // input_items, delete) and answers the Images API, recording every request by
-// the "case=" marker it carries.
+// the "case=" marker it carries. As api.openai.com it also rejects
+// response_format for GPT Image models, like the official API.
 type openAIPlatformStub struct {
 	mu        sync.Mutex
 	seq       int
@@ -49,7 +51,8 @@ func (u *openAIPlatformStub) Do(req *http.Request, _ string, _ int64, _ int) (*h
 	if req.Header.Get("Authorization") != "Bearer sk-relay" {
 		return stubJSON(http.StatusUnauthorized, `{"error":{"message":"bad key","type":"invalid_request_error"}}`), nil
 	}
-	if req.URL.Host != "relay.example.test" {
+	official := req.URL.Host == "api.openai.com"
+	if req.URL.Host != "relay.example.test" && !official {
 		return stubJSON(http.StatusBadGateway, `{"error":{"message":"unexpected host"}}`), nil
 	}
 	var body []byte
@@ -62,13 +65,16 @@ func (u *openAIPlatformStub) Do(req *http.Request, _ string, _ int64, _ int) (*h
 	switch {
 	case req.Method == http.MethodPost && path == "/images/generations":
 		u.record(req, body, gjson.GetBytes(body, "prompt").String())
-		return stubJSON(http.StatusOK, u.imagesResponse(gjson.GetBytes(body, "size").String())), nil
+		return u.images(official, "image_generation", gjson.GetBytes(body, "response_format").Exists(), gjson.GetBytes(body, "stream").Bool(),
+			gjson.GetBytes(body, "partial_images").Int(), gjson.GetBytes(body, "size").String()), nil
 	case req.Method == http.MethodPost && path == "/images/edits":
 		fields, files := parseStubMultipart(req.Header.Get("Content-Type"), body)
 		fields["_files"] = fmt.Sprint(files)
 		encoded, _ := json.Marshal(fields)
 		u.record(req, encoded, fields["prompt"])
-		return stubJSON(http.StatusOK, u.imagesResponse(fields["size"])), nil
+		_, hasResponseFormat := fields["response_format"]
+		partials, _ := strconv.Atoi(fields["partial_images"])
+		return u.images(official, "image_edit", hasResponseFormat, fields["stream"] == "true", int64(partials), fields["size"]), nil
 	case req.Method == http.MethodPost && path == "/responses":
 		return u.createResponse(req, body), nil
 	case strings.HasPrefix(path, "/responses/"):
@@ -104,11 +110,25 @@ func (u *openAIPlatformStub) record(req *http.Request, body []byte, text string)
 	}
 }
 
-func (u *openAIPlatformStub) imagesResponse(size string) string {
+const apiKeyE2EImageUsage = `{"input_tokens":12,"input_tokens_details":{"text_tokens":12,"image_tokens":0},"output_tokens":272,"output_tokens_details":{"image_tokens":272},"total_tokens":284}`
+
+func (u *openAIPlatformStub) images(official bool, eventPrefix string, hasResponseFormat, stream bool, partials int64, size string) *http.Response {
+	if official && hasResponseFormat {
+		return stubJSON(http.StatusBadRequest, `{"error":{"message":"Unknown parameter: 'response_format'.","type":"invalid_request_error","param":"response_format","code":"unknown_parameter"}}`)
+	}
 	if size == "" {
 		size = "1024x1024"
 	}
-	return fmt.Sprintf(`{"created":1767225600,"data":[{"b64_json":%q}],"size":%q,"quality":"low","output_format":"png","usage":{"input_tokens":12,"input_tokens_details":{"text_tokens":12,"image_tokens":0},"output_tokens":272,"output_tokens_details":{"image_tokens":272},"total_tokens":284}}`, apiKeyE2EPNG, size)
+	if !stream {
+		return stubJSON(http.StatusOK, fmt.Sprintf(`{"created":1767225600,"data":[{"b64_json":%q}],"size":%q,"quality":"low","output_format":"png","usage":%s}`, apiKeyE2EPNG, size, apiKeyE2EImageUsage))
+	}
+	var events strings.Builder
+	common := fmt.Sprintf(`"b64_json":%q,"created_at":1767225600,"size":%q,"quality":"low","background":"opaque","output_format":"png"`, apiKeyE2EPNG, size)
+	for i := int64(0); i < partials; i++ {
+		fmt.Fprintf(&events, "event: %[1]s.partial_image\ndata: {\"type\":\"%[1]s.partial_image\",%[2]s,\"partial_image_index\":%[3]d}\n\n", eventPrefix, common, i)
+	}
+	fmt.Fprintf(&events, "event: %[1]s.completed\ndata: {\"type\":\"%[1]s.completed\",%[2]s,\"usage\":%[3]s}\n\n", eventPrefix, common, apiKeyE2EImageUsage)
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(events.String()))}
 }
 
 func (u *openAIPlatformStub) createResponse(req *http.Request, body []byte) *http.Response {
@@ -254,10 +274,10 @@ func newOpenAIAPIKeySDKE2EServer(t *testing.T, svc *OpenAIGatewayService, accoun
 }
 
 // TestOpenAINodeSDKAgainstAPIKeyAccount runs the official OpenAI Node SDK
-// against an OpenAI API-key (relay) account: Images generate/edit with GPT
-// Image 2.6 complexity, and Responses create, retrieve, input_items,
-// previous_response_id, delete and streaming. Point OPENAI_NODE_SDK_DIR at an
-// installed `openai` package to run it.
+// against OpenAI API-key accounts: Images generate/edit with GPT Image 2.6
+// complexity and streaming, response_format on a relay and on the official API,
+// and Responses create, retrieve, input_items, previous_response_id, delete and
+// streaming. Point OPENAI_NODE_SDK_DIR at an installed `openai` package to run it.
 func TestOpenAINodeSDKAgainstAPIKeyAccount(t *testing.T) {
 	sdkDir := os.Getenv("OPENAI_NODE_SDK_DIR")
 	if sdkDir == "" {
@@ -276,12 +296,19 @@ func TestOpenAINodeSDKAgainstAPIKeyAccount(t *testing.T) {
 	}
 	server := newOpenAIAPIKeySDKE2EServer(t, svc, account)
 	defer server.Close()
+	official := &Account{
+		ID: 779, Name: "sdk-e2e-official", Platform: PlatformOpenAI, Type: AccountTypeAPIKey, Concurrency: 8,
+		Credentials: map[string]any{"api_key": "sk-relay"},
+		Status:      StatusActive, Schedulable: true,
+	}
+	officialServer := newOpenAIAPIKeySDKE2EServer(t, svc, official)
+	defer officialServer.Close()
 
 	script, err := filepath.Abs(filepath.Join("testdata", "openai_sdk_apikey_e2e.cjs"))
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "node", script, sdkDir, server.URL+"/v1").CombinedOutput()
+	out, err := exec.CommandContext(ctx, "node", script, sdkDir, server.URL+"/v1", officialServer.URL+"/v1").CombinedOutput()
 	require.NoError(t, err, string(out))
 	var report struct {
 		SDKVersion string                     `json:"sdkVersion"`
@@ -322,6 +349,40 @@ func TestOpenAINodeSDKAgainstAPIKeyAccount(t *testing.T) {
 	for key, want := range map[string]string{"model": "gpt-image-2.6-sunburst", "size": "1024x1024", "quality": "medium", "complexity": "medium", "_files": "1"} {
 		require.Equal(t, want, gjson.GetBytes(sent, key).String(), key)
 	}
+
+	r = result("images_stream_26")
+	require.Equal(t, "image_generation.partial_image,image_generation.partial_image,image_generation.completed", r.Get("types").String())
+	require.Equal(t, apiKeyE2EPNG, r.Get("b64").String())
+	require.Equal(t, int64(272), r.Get("usage.output_tokens").Int())
+	sent = upstream.bodies["img_stream"]
+	require.True(t, gjson.GetBytes(sent, "stream").Bool())
+	require.Equal(t, int64(2), gjson.GetBytes(sent, "partial_images").Int())
+
+	r = result("images_edit_stream_26")
+	require.Equal(t, "image_edit.partial_image,image_edit.completed", r.Get("types").String())
+	sent = upstream.bodies["img_edit_stream"]
+	require.Equal(t, "true", gjson.GetBytes(sent, "stream").String())
+	require.Equal(t, "1", gjson.GetBytes(sent, "partial_images").String())
+
+	r = result("images_relay_response_format")
+	require.Equal(t, apiKeyE2EPNG, r.Get("b64").String())
+	require.Equal(t, "b64_json", gjson.GetBytes(upstream.bodies["img_relay_format"], "response_format").String(), "relays keep response_format")
+
+	r = result("images_official_url")
+	require.Equal(t, "data:image/png;base64,"+apiKeyE2EPNG, r.Get("url").String())
+	require.False(t, r.Get("b64").Exists())
+	require.Equal(t, "https://api.openai.com/v1/images/generations", upstream.requests["img_official_url"].URL.String())
+	require.False(t, gjson.GetBytes(upstream.bodies["img_official_url"], "response_format").Exists())
+
+	r = result("images_official_edit_b64")
+	require.Equal(t, apiKeyE2EPNG, r.Get("b64").String())
+	require.Equal(t, "https://api.openai.com/v1/images/edits", upstream.requests["img_official_edit"].URL.String())
+	require.False(t, gjson.GetBytes(upstream.bodies["img_official_edit"], "response_format").Exists())
+	require.Equal(t, "1", gjson.GetBytes(upstream.bodies["img_official_edit"], "_files").String())
+
+	r = result("images_official_stream")
+	require.Equal(t, "image_generation.partial_image,image_generation.completed", r.Get("types").String())
+	require.False(t, gjson.GetBytes(upstream.bodies["img_official_stream"], "response_format").Exists())
 
 	r = result("responses_retrieve_delete")
 	firstID := r.Get("firstID").String()

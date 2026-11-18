@@ -12,7 +12,7 @@
 
 <a href="https://trendshift.io/repositories/21823" target="_blank"><img src="https://trendshift.io/api/badge/repositories/21823" alt="Wei-Shaw%2Fsub2api | Trendshift" width="250" height="55"/></a>
 
-**AI API Gateway Platform for Subscription Quota Distribution**
+**Production-Grade Unified AI API Gateway · Multi-Provider Quota Orchestration & Billing Platform**
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
@@ -92,7 +92,7 @@ Please read the following carefully before using this project:
 
 <tr>
 <td width="180"><a href="https://roxybrowser.com/invite/bgGKG7"><img src="assets/partners/logos/RoxyBrowser.png" alt="veilx" width="150"></a></td>
-<td>Thanks to RoxyBrowser for sponsoring this project! <a href="https://roxybrowser.com/invite/bgGKG7">RoxyBrowser</a> RoxyBrowser is the perfect partner for Sub2API: it features a built-in native Roxy AI Agent and high-quality native residential IPs, supports batch automation via simple commands, and significantly boosts security and efficiency for multi-account management! Click <a href="https://roxybrowser.com/invite/bgGKG7">this link</a> to sign up and receive a free residential IP package plus a 10% lifetime discount.
+<td>Thanks to RoxyBrowser for sponsoring this project! <a href="https://roxybrowser.com/invite/bgGKG7">RoxyBrowser</a> is the perfect partner for Sub2API: it features a built-in native Roxy AI Agent and high-quality native residential IPs, supports batch automation via simple commands, and significantly boosts security and efficiency for multi-account management! Click <a href="https://roxybrowser.com/invite/bgGKG7">this link</a> to sign up and receive a free residential IP package plus a 10% lifetime discount.
 </td>
 </tr>
 
@@ -172,20 +172,16 @@ Please read the following carefully before using this project:
 
 ## Overview
 
-Sub2API is an AI API gateway platform designed to distribute and manage API quotas from AI product subscriptions. Users can access upstream AI services through platform-generated API Keys, while the platform handles authentication, billing, load balancing, and request forwarding.
+Sub2API (LinkSyncX customized edition) is a production-grade AI API gateway and quota orchestration platform. It aggregates multi-provider AI subscriptions (OAuth / session credentials) and native API keys into resilient upstream pools, issuing unified API Keys while handling **cross-protocol translation, smart load balancing, sticky session routing, live upstream model discovery, token-accurate billing, prompt security auditing, and self-service monetization** out of the box.
 
 ## Features
 
-- **Multi-Account Management** - Support multiple upstream account types (OAuth, API Key)
-- **API Key Distribution** - Generate and manage API Keys for users
-- **Precise Billing** - Token-level usage tracking and cost calculation
-- **Smart Scheduling** - Intelligent account selection with sticky sessions
-- **Concurrency Control** - Per-user and per-account concurrency limits
-- **Rate Limiting** - Configurable request and token rate limits
-- **Built-in Payment System** - Supports EasyPay, Alipay, WeChat Pay, and Stripe for user self-service top-up, no separate payment service needed ([Configuration Guide](docs/PAYMENT.md))
-- **Admin Dashboard** - Web interface for monitoring and management
-- **Composite Groups** - Admin routing layer that resolves requested models to concrete providers for multi-provider groups ([Operator Guide](docs/COMPOSITE_GROUPS.md))
-- **External System Integration** - Embed external systems (e.g. ticketing) via iframe to extend the admin dashboard
+- **Unified Multi-Provider & Multi-Protocol Gateway** — Native support for Anthropic Messages, OpenAI Chat Completions / Stateful Responses (including WebSocket realtime streams & Codex CLI manifests), Google Gemini `v1beta`, and MCP; seamlessly connects **Claude** (OAuth / Setup-Token / API Key / Bedrock / Vertex), **OpenAI** (Codex OAuth / Agent Identity / API Key / GPT Image), **Gemini**, **Antigravity** (Cloud Code OAuth & relay channels with dual Claude + Gemini stacks), **xAI Grok** (Grok Build, Realtime Voice, Imagine Image & Video), **Perplexity** (Sonar Search & MCP), **CodeBuddy**, and **DeepSeek / Zhipu GLM / Kimi / MiniMax**.
+- **Live Upstream Model Synchronization** — Automatically discovers and syncs live upstream model catalogs and capability metadata across OpenAI, Antigravity, Perplexity, CodeBuddy, and Grok accounts, backed by fresh/SWR caching and automatic account failover on `/v1/models` and `/antigravity/v1/models`.
+- **Smart Scheduling & Composite Routing** — Priority-, load-factor-, and health-aware account selection with sticky sessions (Sticky Hold), per-model cooldowns, and instant failover; **Composite Groups** resolve requested models to concrete upstream providers within a single group ([Operator Guide](docs/COMPOSITE_GROUPS.md)).
+- **Egress Isolation & Anti-Risk Protection** — Built-in **Clash Proxy Pool** (one-exit-per-account binding & unified latency probing), per-account **TLS Fingerprint** profiles, and **Device Profile** emulation, enforcing strict fail-closed proxy semantics to prevent origin IP leaks.
+- **Granular Billing, Guardrails & Security Audit** — Token-level accounting (covering cache read/write, reasoning tiers, long-context windows, multimodal media generation, and automatic upstream billing rate probes), dual-layer concurrency/rate limits, group model allowlists, profit guardrails, and an OpenAI-compatible **Prompt Security Audit & Input Guard**.
+- **Built-in Monetization & Observability** — Self-service top-ups and subscriptions via EasyPay, Alipay, WeChat Pay, Stripe, and Airwallex ([Configuration Guide](docs/PAYMENT.md)), with redeem/promo codes and an affiliate rebate system; includes multi-view channel health monitors (V1–V3), a public Model Plaza, one-click in-app updates, and iframe-based external dashboard extensions.
 
 ## Ecosystem
 
