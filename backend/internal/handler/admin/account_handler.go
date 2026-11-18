@@ -3303,13 +3303,18 @@ func (h *AccountHandler) SyncUpstreamModels(c *gin.Context) {
 // POST /api/v1/admin/accounts/models/sync-upstream-preview
 func (h *AccountHandler) SyncUpstreamModelsPreview(c *gin.Context) {
 	var req struct {
-		Platform     string            `json:"platform" binding:"required"`
-		Type         string            `json:"type" binding:"required"`
-		BaseURL      string            `json:"base_url"`
-		APIKey       string            `json:"api_key" binding:"required"`
-		CSRFToken    string            `json:"csrf_token"`
-		ModelMapping map[string]string `json:"model_mapping"`
-		ProxyID      *int64            `json:"proxy_id"`
+		Platform                string            `json:"platform" binding:"required"`
+		Type                    string            `json:"type" binding:"required"`
+		BaseURL                 string            `json:"base_url"`
+		APIKey                  string            `json:"api_key" binding:"required"`
+		CSRFToken               string            `json:"csrf_token"`
+		ModelRestrictionMode    string            `json:"model_restriction_mode"`
+		ModelMapping            map[string]string `json:"model_mapping"`
+		HeaderOverrideEnabled   *bool             `json:"header_override_enabled"`
+		HeaderOverrides         map[string]string `json:"header_overrides"`
+		EnableTLSFingerprint    *bool             `json:"enable_tls_fingerprint"`
+		TLSFingerprintProfileID *int64            `json:"tls_fingerprint_profile_id"`
+		ProxyID                 *int64            `json:"proxy_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		response.BadRequest(c, "Invalid request: "+err.Error())
@@ -3328,6 +3333,27 @@ func (h *AccountHandler) SyncUpstreamModelsPreview(c *gin.Context) {
 			"base_url":      req.BaseURL,
 			"model_mapping": modelMapping,
 		},
+	}
+	if mode := strings.TrimSpace(req.ModelRestrictionMode); mode != "" {
+		tempAccount.Credentials[service.AntigravityModelRestrictionModeKey] = mode
+	}
+	if req.HeaderOverrideEnabled != nil {
+		tempAccount.Credentials["header_override_enabled"] = *req.HeaderOverrideEnabled
+	}
+	if req.HeaderOverrides != nil {
+		tempAccount.Credentials["header_overrides"] = req.HeaderOverrides
+	}
+	if err := service.NormalizeHeaderOverrideCredentials(tempAccount.Credentials); err != nil {
+		response.ErrorFrom(c, err)
+		return
+	}
+	if req.EnableTLSFingerprint != nil && *req.EnableTLSFingerprint {
+		tempAccount.Extra = map[string]any{
+			"enable_tls_fingerprint": true,
+		}
+		if req.TLSFingerprintProfileID != nil && (*req.TLSFingerprintProfileID > 0 || *req.TLSFingerprintProfileID == -1) {
+			tempAccount.Extra["tls_fingerprint_profile_id"] = *req.TLSFingerprintProfileID
+		}
 	}
 
 	if tempAccount.IsPerplexity() {

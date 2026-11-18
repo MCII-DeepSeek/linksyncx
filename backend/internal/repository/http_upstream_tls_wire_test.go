@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
+	"github.com/Wei-Shaw/sub2api/internal/service"
 	"github.com/stretchr/testify/require"
 )
 
@@ -363,4 +364,20 @@ func TestHTTPUpstreamDoWithTLSConcurrentRequestsReuseBoundedPool(t *testing.T) {
 		require.Equal(t, claudeCodeWireHead(upstream.addr, n), head)
 	}
 	require.LessOrEqual(t, upstream.accepted.Load(), int64(accountConcurrency), "connections must stay within the account's pool limit")
+}
+
+func TestHTTPUpstreamGetClientEntryWithTLS_IsolatesUpstreamProfilesWithoutPoolThrashing(t *testing.T) {
+	pool, _ := newWireTestPKI(t)
+	svc := newWireTestUpstream(t, pool)
+	profile := &tlsfingerprint.Profile{Name: "openai-tls", ALPNProtocols: []string{"h2", "http/1.1"}, Curves: []uint16{29}, KeyShareGroups: []uint16{29}}
+
+	entryOpenAI1, err := svc.getClientEntryWithTLS("", 42, 4, profile, service.HTTPUpstreamProfileOpenAI, false, false)
+	require.NoError(t, err)
+	entryDefault, err := svc.getClientEntryWithTLS("", 42, 4, profile, service.HTTPUpstreamProfileDefault, false, false)
+	require.NoError(t, err)
+	entryOpenAI2, err := svc.getClientEntryWithTLS("", 42, 4, profile, service.HTTPUpstreamProfileOpenAI, false, false)
+	require.NoError(t, err)
+
+	require.NotSame(t, entryOpenAI1.client, entryDefault.client, "distinct upstream profiles with different header timeouts must not share one cache slot")
+	require.Same(t, entryOpenAI1.client, entryOpenAI2.client, "interleaved default probe must not evict the active OpenAI TLS client pool")
 }

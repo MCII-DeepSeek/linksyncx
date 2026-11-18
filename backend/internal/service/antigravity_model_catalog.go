@@ -265,6 +265,7 @@ func antigravityRuntimeMappingSignature(a *Account) uint64 {
 		return 0
 	}
 	h := fnv.New64a()
+	_, _ = h.Write([]byte(a.GetCredential(AntigravityModelRestrictionModeKey)))
 	_, liveSig := getAntigravityObservedLiveModels(a.ID)
 	var buf [8]byte
 	for i := 0; i < 8; i++ {

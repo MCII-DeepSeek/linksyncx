@@ -12,6 +12,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/claude"
 	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httpwire"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/oauth"
@@ -436,7 +437,7 @@ func createBrowserReqClient(proxyURL string) (*req.Client, error) {
 // 传输层与数据面同一 persona（2.1.280 实证控制面同样走 Bun fetch）：uTLS 指纹 +
 // ALPN http/1.1，httpwire 重排为 Bun 线级头序；代理由指纹 dialer 自建
 // http / https / socks5 隧道，明文请求同样走隧道不直连。Accept-Encoding 不让 req
-// 自动追加 "gzip"，由 httpwire 补 Bun 默认值，响应在 decompressResponseBody 解压。
+// 自动追加 "gzip"，由 httpwire 补 Bun 默认值，响应在 httputil.DecompressResponseBody 解压。
 // rootCAs 仅供测试注入自签根证书。
 func newControlPlaneReqClient(proxyURL string, rootCAs *x509.CertPool) (*req.Client, error) {
 	_, parsedProxy, err := proxyurl.Parse(proxyURL)
@@ -459,7 +460,7 @@ func newControlPlaneReqClient(proxyURL string, rootCAs *x509.CertPool) (*req.Cli
 		return func(r *http.Request) (*http.Response, error) {
 			resp, err := rt.RoundTrip(r)
 			if err == nil {
-				decompressResponseBody(resp)
+				httputil.DecompressResponseBody(resp)
 			}
 			return resp, err
 		}

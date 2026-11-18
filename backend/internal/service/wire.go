@@ -281,6 +281,132 @@ func ProvideOpenAIGatewayService(
 	return service
 }
 
+func ProvideAntigravityOAuthService(
+	proxyRepo ProxyRepository,
+	tlsFPProfileService *TLSFingerprintProfileService,
+) *AntigravityOAuthService {
+	svc := NewAntigravityOAuthService(proxyRepo)
+	svc.SetTLSFingerprintProfileService(tlsFPProfileService)
+	return svc
+}
+
+func ProvideAntigravityGatewayService(
+	accountRepo AccountRepository,
+	cache GatewayCache,
+	schedulerSnapshot *SchedulerSnapshotService,
+	tokenProvider *AntigravityTokenProvider,
+	rateLimitService *RateLimitService,
+	httpUpstream HTTPUpstream,
+	settingService *SettingService,
+	internal500Cache Internal500CounterCache,
+	tlsFPProfileService *TLSFingerprintProfileService,
+) *AntigravityGatewayService {
+	svc := NewAntigravityGatewayService(
+		accountRepo,
+		cache,
+		schedulerSnapshot,
+		tokenProvider,
+		rateLimitService,
+		httpUpstream,
+		settingService,
+		internal500Cache,
+	)
+	svc.SetTLSFingerprintProfileService(tlsFPProfileService)
+	return svc
+}
+
+func ProvideGeminiMessagesCompatService(
+	accountRepo AccountRepository,
+	groupRepo GroupRepository,
+	cache GatewayCache,
+	schedulerSnapshot *SchedulerSnapshotService,
+	tokenProvider *GeminiTokenProvider,
+	rateLimitService *RateLimitService,
+	httpUpstream HTTPUpstream,
+	antigravityGatewayService *AntigravityGatewayService,
+	cfg *config.Config,
+	tlsFPProfileService *TLSFingerprintProfileService,
+) *GeminiMessagesCompatService {
+	svc := NewGeminiMessagesCompatService(
+		accountRepo,
+		groupRepo,
+		cache,
+		schedulerSnapshot,
+		tokenProvider,
+		rateLimitService,
+		httpUpstream,
+		antigravityGatewayService,
+		cfg,
+	)
+	svc.SetTLSFingerprintProfileService(tlsFPProfileService)
+	return svc
+}
+
+func ProvideAntigravityQuotaFetcher(
+	proxyRepo ProxyRepository,
+	cfg *config.Config,
+	tlsFPProfileService *TLSFingerprintProfileService,
+) *AntigravityQuotaFetcher {
+	fetcher := NewAntigravityQuotaFetcher(proxyRepo, cfg)
+	fetcher.SetTLSFingerprintProfileService(tlsFPProfileService)
+	return fetcher
+}
+
+func ProvideAdminService(
+	cfg *config.Config,
+	userRepo UserRepository,
+	groupRepo AdminGroupRepository,
+	accountRepo AdminAccountRepository,
+	proxyRepo ProxyRepository,
+	apiKeyRepo APIKeyRepository,
+	redeemCodeRepo RedeemCodeRepository,
+	userGroupRateRepo UserGroupRateRepository,
+	userRPMCache UserRPMCache,
+	billingCacheService *BillingCacheService,
+	proxyProber ProxyExitInfoProber,
+	proxyLatencyCache ProxyLatencyCache,
+	authCacheInvalidator APIKeyAuthCacheInvalidator,
+	entClient *dbent.Client,
+	settingService *SettingService,
+	defaultSubAssigner DefaultSubscriptionAssigner,
+	userSubRepo UserSubscriptionRepository,
+	privacyClientFactory PrivacyClientFactory,
+	runtimeBlocker AccountRuntimeBlocker,
+	affiliateService *AffiliateService,
+	compositeRouteRepo CompositeModelRouteRepository,
+	compositeResolver *CompositeRouteResolver,
+	channelCacheInvalidator ChannelCacheInvalidator,
+	tlsFPProfileService *TLSFingerprintProfileService,
+) AdminService {
+	svc := NewAdminService(
+		cfg,
+		userRepo,
+		groupRepo,
+		accountRepo,
+		proxyRepo,
+		apiKeyRepo,
+		redeemCodeRepo,
+		userGroupRateRepo,
+		userRPMCache,
+		billingCacheService,
+		proxyProber,
+		proxyLatencyCache,
+		authCacheInvalidator,
+		entClient,
+		settingService,
+		defaultSubAssigner,
+		userSubRepo,
+		privacyClientFactory,
+		runtimeBlocker,
+		affiliateService,
+		compositeRouteRepo,
+		compositeResolver,
+		channelCacheInvalidator,
+	)
+	AttachTLSFingerprintProfileService(svc, tlsFPProfileService)
+	return svc
+}
+
 func ProvideAccountUsageService(
 	accountRepo AccountRepository,
 	usageLogRepo UsageLogRepository,
@@ -965,7 +1091,7 @@ var ProviderSet = wire.NewSet(
 	NewBillingService,
 	ProvideBillingCacheService,
 	NewAnnouncementService,
-	NewAdminService,
+	ProvideAdminService,
 	NewGatewayService,
 	ProvideOpenAIGatewayService,
 	ProvideImageStorageSettingService,
@@ -984,10 +1110,10 @@ var ProviderSet = wire.NewSet(
 	NewGeminiQuotaService,
 	NewCompositeTokenCacheInvalidator,
 	wire.Bind(new(TokenCacheInvalidator), new(*CompositeTokenCacheInvalidator)),
-	NewAntigravityOAuthService,
+	ProvideAntigravityOAuthService,
 	ProvideOAuthRefreshAPI,
 	ProvideGeminiTokenProvider,
-	NewGeminiMessagesCompatService,
+	ProvideGeminiMessagesCompatService,
 	ProvideAntigravityTokenProvider,
 	ProvideGrokTokenProvider,
 	NewCodeBuddyOAuthService,
@@ -1002,7 +1128,7 @@ var ProviderSet = wire.NewSet(
 	ProvideCNProviderBalanceCheckService,
 	ProvidePerplexityMaintenanceService,
 	ProvideClaudeTokenProvider,
-	NewAntigravityGatewayService,
+	ProvideAntigravityGatewayService,
 	ProvideRateLimitService,
 	ProvideAccountUsageService,
 	ProvideAccountTestService,
@@ -1050,7 +1176,7 @@ var ProviderSet = wire.NewSet(
 	ProvideDashboardAggregationService,
 	ProvideUsageCleanupService,
 	ProvideDeferredService,
-	NewAntigravityQuotaFetcher,
+	ProvideAntigravityQuotaFetcher,
 	NewGrokQuotaFetcher,
 	NewUserAttributeService,
 	NewUsageCache,

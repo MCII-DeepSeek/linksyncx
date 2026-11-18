@@ -12,12 +12,20 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/http2"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httpwire"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/servertiming"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 )
 
 // ForbiddenError 表示上游返回 403 Forbidden
@@ -260,6 +268,13 @@ type Client struct {
 	httpClient *http.Client
 }
 
+// CloseIdleConnections 主动关闭客户端底层空闲连接（供未落库账号的临时校验/授权流程释放套接字）。
+func (c *Client) CloseIdleConnections() {
+	if c != nil && c.httpClient != nil {
+		c.httpClient.CloseIdleConnections()
+	}
+}
+
 const (
 	// proxyDialTimeout 代理 TCP 连接超时（含代理握手），代理不通时快速失败
 	proxyDialTimeout = 5 * time.Second
@@ -267,33 +282,266 @@ const (
 	proxyTLSHandshakeTimeout = 5 * time.Second
 	// clientTimeout 整体请求超时（含连接、发送、等待响应、读取 body）
 	clientTimeout = 10 * time.Second
+	// clientDialKeepAlive TCP KeepAlive 探测间隔
+	clientDialKeepAlive = 30 * time.Second
+	// clientIdleConnTimeout 空闲长连接保留时长
+	clientIdleConnTimeout = 90 * time.Second
+	// clientMaxIdleConns 控制面连接池最大空闲连接数
+	clientMaxIdleConns = 64
+	// clientMaxIdleConnsPerHost 控制面单主机最大空闲连接数
+	clientMaxIdleConnsPerHost = 16
+	// clientHTTP2ReadIdleTimeout H2 连接空闲健康 PING 间隔
+	clientHTTP2ReadIdleTimeout = 10 * time.Second
+	// clientHTTP2PingTimeout H2 PING 应答超时
+	clientHTTP2PingTimeout = 5 * time.Second
+	// maxCachedClientTransports 控制面缓存池最大 Transport 条目数
+	maxCachedClientTransports = 1024
+	// cachedTransportIdleTTL 空闲 Transport 淘汰阈值
+	cachedTransportIdleTTL = 15 * time.Minute
 )
 
-func NewClient(proxyURL string) (*Client, error) {
-	client := &http.Client{
-		Timeout: clientTimeout,
+type cachedTransportEntry struct {
+	rt       http.RoundTripper
+	closer   func()
+	lastUsed atomic.Int64
+}
+
+var (
+	sharedTransportMu sync.RWMutex
+	sharedTransports  = make(map[string]*cachedTransportEntry)
+)
+
+func getOrBuildSharedRoundTripper(cacheKey string, builder func() (http.RoundTripper, func(), error)) (http.RoundTripper, error) {
+	now := time.Now()
+	nowNano := now.UnixNano()
+
+	sharedTransportMu.RLock()
+	if entry, ok := sharedTransports[cacheKey]; ok {
+		entry.lastUsed.Store(nowNano)
+		sharedTransportMu.RUnlock()
+		return entry.rt, nil
+	}
+	sharedTransportMu.RUnlock()
+
+	sharedTransportMu.Lock()
+	defer sharedTransportMu.Unlock()
+	if entry, ok := sharedTransports[cacheKey]; ok {
+		entry.lastUsed.Store(nowNano)
+		return entry.rt, nil
 	}
 
-	_, parsed, err := proxyurl.Parse(proxyURL)
+	// 淘汰超时空闲条目与超限最旧条目
+	cutoff := now.Add(-cachedTransportIdleTTL).UnixNano()
+	for k, e := range sharedTransports {
+		if e.lastUsed.Load() <= cutoff {
+			delete(sharedTransports, k)
+			if e.closer != nil {
+				e.closer()
+			}
+		}
+	}
+	for len(sharedTransports) >= maxCachedClientTransports {
+		var (
+			oldestKey  string
+			oldestTime int64
+			oldest     *cachedTransportEntry
+		)
+		for k, e := range sharedTransports {
+			lu := e.lastUsed.Load()
+			if oldest == nil || lu < oldestTime {
+				oldestKey, oldestTime, oldest = k, lu, e
+			}
+		}
+		if oldest == nil {
+			break
+		}
+		delete(sharedTransports, oldestKey)
+		if oldest.closer != nil {
+			oldest.closer()
+		}
+	}
+
+	rt, closer, err := builder()
 	if err != nil {
 		return nil, err
 	}
-	if parsed != nil {
-		transport := &http.Transport{
-			DialContext: (&net.Dialer{
-				Timeout: proxyDialTimeout,
-			}).DialContext,
-			TLSHandshakeTimeout: proxyTLSHandshakeTimeout,
-			// 与真实客户端（及无代理时走的 http.DefaultTransport）一致，走代理也协商 HTTP/2。
-			ForceAttemptHTTP2: true,
-		}
-		if err := proxyutil.ConfigureTransportProxy(transport, parsed); err != nil {
+	entry := &cachedTransportEntry{rt: rt, closer: closer}
+	entry.lastUsed.Store(nowNano)
+	sharedTransports[cacheKey] = entry
+	return rt, nil
+}
+
+func buildPooledStandardTransport(parsedProxy *url.URL) (*http.Transport, error) {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   proxyDialTimeout,
+			KeepAlive: clientDialKeepAlive,
+		}).DialContext,
+		TLSHandshakeTimeout: proxyTLSHandshakeTimeout,
+		MaxIdleConns:        clientMaxIdleConns,
+		MaxIdleConnsPerHost: clientMaxIdleConnsPerHost,
+		IdleConnTimeout:     clientIdleConnTimeout,
+		// 与真实客户端一致，直连与走代理均协商 HTTP/2 并开启死连接主动 PING 探测。
+		ForceAttemptHTTP2: true,
+	}
+	if h2, err := http2.ConfigureTransports(transport); err == nil && h2 != nil {
+		h2.ReadIdleTimeout = clientHTTP2ReadIdleTimeout
+		h2.PingTimeout = clientHTTP2PingTimeout
+	}
+	if parsedProxy == nil {
+		transport.Proxy = http.ProxyFromEnvironment
+	} else {
+		if err := proxyutil.ConfigureTransportProxy(transport, parsedProxy); err != nil {
 			return nil, fmt.Errorf("configure proxy: %w", err)
 		}
-		client.Transport = transport
+	}
+	return transport, nil
+}
+
+type tlsAwareRoundTripper struct {
+	tlsTransport http.RoundTripper
+}
+
+func (t *tlsAwareRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.tlsTransport.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	httputil.DecompressResponseBody(resp)
+	return resp, nil
+}
+
+func (t *tlsAwareRoundTripper) CloseIdleConnections() {
+	if closer, ok := t.tlsTransport.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+}
+
+func buildTLSRoundTripper(parsedProxy *url.URL, tlsProfile *tlsfingerprint.Profile) (http.RoundTripper, func(), error) {
+	dialOpts := tlsfingerprint.DialOptions{
+		DialTimeout:         proxyDialTimeout,
+		HandshakeTimeout:    proxyTLSHandshakeTimeout,
+		KeepAlive:           clientDialKeepAlive,
+		UseEnvironmentProxy: parsedProxy == nil,
+	}
+	if tlsfingerprint.ProfileSupportsHTTP2(tlsProfile) {
+		h2RT, err := tlsfingerprint.NewHTTP2CapableTransport(tlsProfile, parsedProxy, dialOpts, tlsfingerprint.HTTP2TransportConfig{
+			MaxIdleConns:          clientMaxIdleConns,
+			MaxIdleConnsPerHost:   clientMaxIdleConnsPerHost,
+			IdleConnTimeout:       clientIdleConnTimeout,
+			ResponseHeaderTimeout: clientTimeout,
+			ReadIdleTimeout:       clientHTTP2ReadIdleTimeout,
+			PingTimeout:           clientHTTP2PingTimeout,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		wrapper := &tlsAwareRoundTripper{tlsTransport: h2RT}
+		return wrapper, wrapper.CloseIdleConnections, nil
+	}
+
+	dialer, dErr := tlsfingerprint.NewProxyDialer(tlsProfile, parsedProxy, dialOpts)
+	if dErr != nil {
+		return nil, nil, dErr
+	}
+	tlsTr := &http.Transport{
+		DialContext:           httpwire.WrapDialer(dialer.DialContext),
+		DialTLSContext:        httpwire.WrapDialer(dialer.DialTLSContext),
+		DisableCompression:    true,
+		MaxIdleConns:          clientMaxIdleConns,
+		MaxIdleConnsPerHost:   clientMaxIdleConnsPerHost,
+		IdleConnTimeout:       clientIdleConnTimeout,
+		ResponseHeaderTimeout: clientTimeout,
+		ForceAttemptHTTP2:     false,
+	}
+	wrapper := &tlsAwareRoundTripper{tlsTransport: tlsTr}
+	return wrapper, wrapper.CloseIdleConnections, nil
+}
+
+// NewClient 创建独立（不跨账号共享连接池）的 Antigravity API 客户端，适用于未落库账号的单次授权/校验流程。
+func NewClient(proxyURL string) (*Client, error) {
+	return NewClientWithTLS(proxyURL, nil)
+}
+
+// NewClientWithTLS 创建独立（不跨账号共享连接池）且可选携带 uTLS 指纹的 Antigravity API 客户端。
+// 未指定 accountID 的临时客户端绝不放入全局缓存池，防止批量导入/授权时跨账号复用同一连接或 TLS Session Ticket。
+func NewClientWithTLS(proxyURL string, tlsProfile *tlsfingerprint.Profile) (*Client, error) {
+	return NewClientForAccount(proxyURL, 0, tlsProfile)
+}
+
+// NewClientForAccount 创建按账号级隔离复用连接池与 TLS Session Ticket 的控制面客户端：
+//   - accountID > 0：按 (accountID, proxy, tlsProfile) 隔离缓存长连接池与 uTLS 会话票据，
+//     同一账号的控制面调用复用连接消除重复握手，不同账号（含共享同一旋转代理网关）物理隔离绝不串连；
+//   - accountID <= 0：创建一次性独立 Transport，不写入跨调用共享缓存池。
+func NewClientForAccount(proxyURL string, accountID int64, tlsProfile *tlsfingerprint.Profile) (*Client, error) {
+	normalizedProxy, parsed, err := proxyurl.Parse(proxyURL)
+	if err != nil {
+		return nil, err
+	}
+	proxyKey := "direct"
+	if parsed != nil {
+		proxyKey = normalizedProxy
+	}
+
+	if tlsProfile == nil {
+		if accountID <= 0 {
+			tr, trErr := buildPooledStandardTransport(parsed)
+			if trErr != nil {
+				return nil, trErr
+			}
+			return &Client{
+				httpClient: &http.Client{
+					Timeout:   clientTimeout,
+					Transport: tr,
+				},
+			}, nil
+		}
+		cacheKey := "std|acct:" + strconv.FormatInt(accountID, 10) + "|" + proxyKey
+		rt, buildErr := getOrBuildSharedRoundTripper(cacheKey, func() (http.RoundTripper, func(), error) {
+			tr, trErr := buildPooledStandardTransport(parsed)
+			if trErr != nil {
+				return nil, nil, trErr
+			}
+			return tr, tr.CloseIdleConnections, nil
+		})
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		return &Client{
+			httpClient: &http.Client{
+				Timeout:   clientTimeout,
+				Transport: rt,
+			},
+		}, nil
+	}
+
+	if err := tlsfingerprint.ValidateProfile(tlsProfile); err != nil {
+		return nil, err
+	}
+	if accountID <= 0 {
+		rt, _, buildErr := buildTLSRoundTripper(parsed, tlsProfile)
+		if buildErr != nil {
+			return nil, buildErr
+		}
+		return &Client{
+			httpClient: &http.Client{
+				Timeout:   clientTimeout,
+				Transport: rt,
+			},
+		}, nil
+	}
+	cacheKey := "tls|acct:" + strconv.FormatInt(accountID, 10) + "|" + proxyKey + "|fp:" + tlsfingerprint.ProfileCacheKey(tlsProfile)
+	rt, buildErr := getOrBuildSharedRoundTripper(cacheKey, func() (http.RoundTripper, func(), error) {
+		return buildTLSRoundTripper(parsed, tlsProfile)
+	})
+	if buildErr != nil {
+		return nil, buildErr
 	}
 	return &Client{
-		httpClient: client,
+		httpClient: &http.Client{
+			Timeout:   clientTimeout,
+			Transport: rt,
+		},
 	}, nil
 }
 
@@ -352,6 +600,7 @@ func (c *Client) ExchangeCode(ctx context.Context, code, codeVerifier string) (*
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", GetUserAgentForContext(ctx))
 
 	resp, err := servertiming.Do(c.httpClient, req)
 	if err != nil {
@@ -394,6 +643,7 @@ func (c *Client) RefreshToken(ctx context.Context, refreshToken string) (*TokenR
 		return nil, fmt.Errorf("创建请求失败: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", GetUserAgentForContext(ctx))
 
 	resp, err := servertiming.Do(c.httpClient, req)
 	if err != nil {
@@ -458,7 +708,7 @@ func (c *Client) LoadCodeAssist(ctx context.Context, accessToken string) (*LoadC
 	reqBody.Metadata.IDEType = "ANTIGRAVITY"
 	reqBody.Metadata.IDEVersion = GetUserAgentVersionForContext(ctx)
 	reqBody.Metadata.IDEName = "antigravity"
-	reqBody.Metadata.Platform = DevicePlatformFromContext(ctx)
+	reqBody.Metadata.Platform = EffectiveDevicePlatformForContext(ctx)
 
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
@@ -471,7 +721,7 @@ func (c *Client) LoadCodeAssist(ctx context.Context, accessToken string) (*LoadC
 	var lastErr error
 	for urlIdx, baseURL := range availableURLs {
 		apiURL := baseURL + "/v1internal:loadCodeAssist"
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, strings.NewReader(string(bodyBytes)))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
 		if err != nil {
 			lastErr = fmt.Errorf("创建请求失败: %w", err)
 			continue
@@ -533,11 +783,7 @@ func (c *Client) OnboardUser(ctx context.Context, accessToken, tierID string) (s
 
 	reqBody := OnboardUserRequest{TierID: tierID}
 	reqBody.Metadata.IDEType = "ANTIGRAVITY"
-	if platform := DevicePlatformFromContext(ctx); platform != "" {
-		reqBody.Metadata.Platform = platform
-	} else {
-		reqBody.Metadata.Platform = "PLATFORM_UNSPECIFIED"
-	}
+	reqBody.Metadata.Platform = EffectiveDevicePlatformForContext(ctx)
 	reqBody.Metadata.PluginType = "GEMINI"
 
 	bodyBytes, err := json.Marshal(reqBody)
@@ -692,7 +938,7 @@ func (c *Client) FetchAvailableModels(ctx context.Context, accessToken, projectI
 	var lastErr error
 	for urlIdx, baseURL := range availableURLs {
 		apiURL := baseURL + "/v1internal:fetchAvailableModels"
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, strings.NewReader(string(bodyBytes)))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
 		if err != nil {
 			lastErr = fmt.Errorf("创建请求失败: %w", err)
 			continue
@@ -800,7 +1046,7 @@ func (c *Client) RetrieveUserQuotaSummary(ctx context.Context, accessToken, proj
 	var lastErr error
 	for urlIdx, baseURL := range availableURLs {
 		apiURL := baseURL + "/v1internal:retrieveUserQuotaSummary"
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, strings.NewReader(string(bodyBytes)))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, apiURL, bytes.NewReader(bodyBytes))
 		if err != nil {
 			lastErr = fmt.Errorf("创建请求失败: %w", err)
 			continue

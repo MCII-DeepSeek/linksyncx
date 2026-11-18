@@ -1464,12 +1464,15 @@ export default {
         tlsFingerprint: {
           label: 'TLS 指纹模拟',
           hint: '模拟 Node.js/Claude Code 客户端的 TLS 指纹',
+          antigravityOAuthHint: '使用自定义 uTLS 指纹建立 HTTP/2 连接（未开启时保持平台原生 HTTP/2 传输栈）',
+          antigravityRelayHint: '使用自定义 uTLS 指纹请求上游中转服务（默认模拟 Claude Code HTTP/1.1 形态，模板含 h2 时协商 HTTP/2）',
           defaultProfile: '内置默认',
           randomProfile: '随机（按账号固定）'
         },
         sessionIdMasking: {
           label: '单会话模式',
-          hint: '开启后该账号的对话共用一个会话 ID（15 分钟滑动），会话上限视为 1：同一时刻只接一个对话，其它新对话调度到别的账号。建议同时开启串行队列'
+          hint: '开启后该账号的对话共用一个会话 ID（15 分钟滑动），会话上限视为 1：同一时刻只接一个对话，其它新对话调度到别的账号。建议同时开启串行队列',
+          antigravityHint: '在 15 分钟窗口内将该账号的出站请求收敛为同一个官方格式 sessionId，隐藏多人共享痕迹'
         },
         cacheTTLOverride: {
           label: '缓存 TTL 强制替换',

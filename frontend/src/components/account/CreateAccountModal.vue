@@ -1235,6 +1235,126 @@
             :aria-label="t('admin.accounts.upstreamBilling.autoProbe')"
           />
         </div>
+
+        <!-- Header Override Section (Antigravity upstream relay) -->
+        <div
+          v-if="isHeaderOverrideCapable('antigravity', 'upstream')"
+          class="border-t border-gray-200 pt-4 dark:border-dark-600"
+          data-testid="create-antigravity-header-override"
+        >
+          <div class="mb-3 flex items-center justify-between">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.headerOverride.title') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.headerOverride.hint') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              @click="headerOverrideEnabled = !headerOverrideEnabled"
+              :class="[
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+                headerOverrideEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+              ]"
+            >
+              <span
+                :class="[
+                  'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                  headerOverrideEnabled ? 'translate-x-5' : 'translate-x-0'
+                ]"
+              />
+            </button>
+          </div>
+
+          <div v-if="headerOverrideEnabled" class="space-y-3">
+            <div class="rounded-lg bg-blue-50 p-3 dark:bg-blue-900/20">
+              <p class="text-xs text-blue-700 dark:text-blue-400">
+                <Icon name="exclamationCircle" size="sm" class="mr-1 inline" :stroke-width="2" />
+                {{ t('admin.accounts.headerOverride.info') }}
+              </p>
+            </div>
+
+            <HeaderOverrideEditor
+              :rows="headerOverrideRows"
+              @update:rows="headerOverrideRows = $event"
+            />
+          </div>
+        </div>
+      </div>
+
+      <!-- Antigravity TLS Fingerprint & Session Masking (aligned with Claude/OpenAI) -->
+      <div v-if="form.platform === 'antigravity'" class="space-y-4">
+        <div
+          class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
+          data-testid="create-antigravity-tls-fingerprint"
+        >
+          <div class="flex items-center justify-between">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.tlsFingerprint.label') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{
+                  antigravityAccountType === 'oauth'
+                    ? t('admin.accounts.quotaControl.tlsFingerprint.antigravityOAuthHint')
+                    : t('admin.accounts.quotaControl.tlsFingerprint.antigravityRelayHint')
+                }}
+              </p>
+            </div>
+            <button
+              type="button"
+              data-testid="create-antigravity-tls-fingerprint-toggle"
+              @click="tlsFingerprintEnabled = !tlsFingerprintEnabled"
+              :class="[
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+                tlsFingerprintEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+              ]"
+            >
+              <span
+                :class="[
+                  'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                  tlsFingerprintEnabled ? 'translate-x-5' : 'translate-x-0'
+                ]"
+              />
+            </button>
+          </div>
+          <div v-if="tlsFingerprintEnabled" class="mt-3">
+            <select v-model="tlsFingerprintProfileId" class="input" data-testid="create-antigravity-tls-profile-select">
+              <option :value="null">{{ t('admin.accounts.quotaControl.tlsFingerprint.defaultProfile') }}</option>
+              <option v-if="tlsFingerprintProfiles.length > 0" :value="-1">{{ t('admin.accounts.quotaControl.tlsFingerprint.randomProfile') }}</option>
+              <option v-for="p in tlsFingerprintProfiles" :key="p.id" :value="p.id">{{ p.name }}</option>
+            </select>
+          </div>
+        </div>
+
+        <div
+          v-if="antigravityAccountType === 'oauth'"
+          class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
+          data-testid="create-antigravity-session-masking"
+        >
+          <div class="flex items-center justify-between">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.sessionIdMasking.label') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.quotaControl.sessionIdMasking.antigravityHint') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              data-testid="create-antigravity-session-masking-toggle"
+              @click="sessionIdMaskingEnabled = !sessionIdMaskingEnabled"
+              :class="[
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+                sessionIdMaskingEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+              ]"
+            >
+              <span
+                :class="[
+                  'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                  sessionIdMaskingEnabled ? 'translate-x-5' : 'translate-x-0'
+                ]"
+              />
+            </button>
+          </div>
+        </div>
       </div>
 
       <!-- Vertex Service Account -->
@@ -4113,6 +4233,7 @@ import {
   getPresetMappingsByPlatform,
   getModelsByPlatform,
   commonErrorCodes,
+  buildAntigravityModelRestriction,
   buildModelMappingObject,
   isValidWildcardPattern
 } from '@/composables/useModelWhitelist'
@@ -4658,6 +4779,21 @@ function onCnPresetSelect(preset: { mode: CnAccountMode; protocol: CnApiProtocol
   apiKeyBaseUrl.value = preset.url
 }
 
+const buildValidPreviewHeaderOverride = (platform: string, type: string) => {
+  if (!isHeaderOverrideCapable(platform, type) || !headerOverrideEnabled.value) {
+    return {}
+  }
+  if (validateHeaderOverrideRows(headerOverrideRows.value) !== null) {
+    return {}
+  }
+  const credentials: Record<string, unknown> = {}
+  applyHeaderOverride(credentials, true, headerOverrideRows.value, 'create')
+  return credentials as {
+    header_override_enabled?: boolean
+    header_overrides?: Record<string, string>
+  }
+}
+
 const syncPreviewCredentials = computed(() => {
   if (!apiKeyValue.value) return undefined
   const baseUrl = isMultiProtocolPlatform.value && apiProtocol.value === 'adaptive'
@@ -4677,7 +4813,8 @@ const syncPreviewCredentials = computed(() => {
     ...(form.platform === 'perplexity' && perplexityCsrfToken.value.trim()
       ? { csrf_token: perplexityCsrfToken.value.trim() }
       : {}),
-    ...(modelMapping ? { model_mapping: modelMapping } : {})
+    ...(modelMapping ? { model_mapping: modelMapping } : {}),
+    ...buildValidPreviewHeaderOverride(form.platform, form.type)
   }
 })
 
@@ -4833,20 +4970,27 @@ const canSyncAntigravityUpstream = computed(() =>
 const antigravityModelRestrictionMode = ref<'whitelist' | 'mapping'>('mapping')
 const antigravityWhitelistModels = ref<string[]>([])
 const antigravityModelMappings = ref<ModelMapping[]>([])
+const antigravityRestrictionCredentials = computed(() => buildAntigravityModelRestriction(
+  antigravityModelRestrictionMode.value,
+  antigravityWhitelistModels.value,
+  antigravityModelMappings.value
+))
 const antigravitySyncPreviewCredentials = computed(() => {
   if (!canSyncAntigravityUpstream.value) return undefined
-  const modelMapping = buildModelMappingObject(
-    antigravityModelRestrictionMode.value,
-    antigravityWhitelistModels.value,
-    antigravityModelMappings.value
-  )
   return {
     platform: 'antigravity' as const,
     type: 'apikey' as const,
     base_url: upstreamBaseUrl.value.trim(),
     api_key: upstreamApiKey.value.trim(),
     ...(form.proxy_id != null ? { proxy_id: form.proxy_id } : {}),
-    ...(modelMapping ? { model_mapping: modelMapping } : {})
+    ...antigravityRestrictionCredentials.value,
+    ...buildValidPreviewHeaderOverride('antigravity', 'upstream'),
+    ...(tlsFingerprintEnabled.value
+      ? {
+          enable_tls_fingerprint: true,
+          ...(tlsFingerprintProfileId.value ? { tls_fingerprint_profile_id: tlsFingerprintProfileId.value } : {})
+        }
+      : {})
   }
 })
 const antigravityPresetMappings = computed(() => getPresetMappingsByPlatform('antigravity'))
@@ -4942,6 +5086,15 @@ function buildAntigravityExtra(): Record<string, unknown> | undefined {
   const extra: Record<string, unknown> = {}
   if (mixedScheduling.value) extra.mixed_scheduling = true
   if (allowOverages.value) extra.allow_overages = true
+  if (tlsFingerprintEnabled.value) {
+    extra.enable_tls_fingerprint = true
+    if (tlsFingerprintProfileId.value) {
+      extra.tls_fingerprint_profile_id = tlsFingerprintProfileId.value
+    }
+  }
+  if (antigravityAccountType.value === 'oauth' && sessionIdMaskingEnabled.value) {
+    extra.session_id_masking_enabled = true
+  }
   return Object.keys(extra).length > 0 ? extra : undefined
 }
 
@@ -5343,10 +5496,13 @@ watch(
       anthropicAPIKeyAuthScheme.value = 'x_api_key'
       webSearchEmulationMode.value = 'default'
     }
-    // 请求头覆写为平台相关配置（常用头集合不同），切换平台时清空，
-    // 避免上一平台的配置行被提交到新平台账号
+    // 请求头覆写、TLS 指纹与会话伪装均为平台相关开关，切换平台时清空，
+    // 避免上一平台的勾选状态被静默带入新平台账号
     headerOverrideEnabled.value = false
     headerOverrideRows.value = []
+    tlsFingerprintEnabled.value = false
+    tlsFingerprintProfileId.value = null
+    sessionIdMaskingEnabled.value = false
     openAIImagesUrlToB64JsonEnabled.value = false
     grokOAuthCustomBaseUrlEnabled.value = false
     grokOAuthBaseUrl.value = ''
@@ -6259,13 +6415,17 @@ const handleSubmit = async () => {
     }
 
     // Antigravity 支持白名单模式与映射模式
-    const antigravityModelMapping = buildModelMappingObject(
-      antigravityModelRestrictionMode.value,
-      antigravityWhitelistModels.value,
-      antigravityModelMappings.value
-    )
-    if (antigravityModelMapping) {
-      credentials.model_mapping = antigravityModelMapping
+    Object.assign(credentials, antigravityRestrictionCredentials.value)
+
+    if (isHeaderOverrideCapable('antigravity', 'upstream')) {
+      if (headerOverrideEnabled.value) {
+        const headerError = validateHeaderOverrideRows(headerOverrideRows.value)
+        if (headerError) {
+          appStore.showError(t(`admin.accounts.headerOverride.${headerError}`))
+          return
+        }
+      }
+      applyHeaderOverride(credentials, headerOverrideEnabled.value, headerOverrideRows.value, 'create')
     }
 
     applyInterceptWarmup(credentials, interceptWarmupRequests.value, 'create')
@@ -7366,26 +7526,18 @@ const handleAntigravityValidateRT = async (refreshTokenInput: string) => {
           deviceProfiles[i]
         )
         applyAntigravityProjectID(credentials, antigravityProjectId.value, 'create')
-        const batchAntigravityMapping = buildModelMappingObject(
-          antigravityModelRestrictionMode.value,
-          antigravityWhitelistModels.value,
-          antigravityModelMappings.value
-        )
-        if (batchAntigravityMapping) {
-          credentials.model_mapping = batchAntigravityMapping
-        }
+        Object.assign(credentials, antigravityRestrictionCredentials.value)
         
         // Generate account name with index for batch
         const accountName = refreshTokens.length > 1 ? `${form.name} #${i + 1}` : form.name
 
-        // Note: Antigravity doesn't have buildExtraInfo, so we pass empty extra or rely on credentials
         const createPayload = withAntigravityConfirmFlag({
           name: accountName,
           notes: form.notes,
           platform: 'antigravity',
           type: 'oauth',
           credentials,
-          extra: withUpstreamRequestIdHeader({}),
+          extra: withUpstreamRequestIdHeader(buildAntigravityExtra() || {}),
           proxy_id: form.proxy_id,
           concurrency: form.concurrency,
           load_factor: form.load_factor ?? undefined,
@@ -7495,14 +7647,7 @@ const handleAntigravityExchange = async (authCode: string) => {
 		applyInterceptWarmup(credentials, interceptWarmupRequests.value, 'create')
 		withDeviceProfile(credentials, accountDeviceProfile)
 		// Antigravity 支持白名单模式与映射模式
-		const antigravityModelMapping = buildModelMappingObject(
-			antigravityModelRestrictionMode.value,
-			antigravityWhitelistModels.value,
-			antigravityModelMappings.value
-		)
-		if (antigravityModelMapping) {
-			credentials.model_mapping = antigravityModelMapping
-		}
+		Object.assign(credentials, antigravityRestrictionCredentials.value)
 		const extra = buildAntigravityExtra()
 		await createAccountAndFinish('antigravity', 'oauth', credentials, extra)
   } catch (error: any) {

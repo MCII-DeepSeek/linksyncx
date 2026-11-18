@@ -116,6 +116,9 @@ func doAntigravityRequest(p antigravityRetryLoopParams, req *http.Request) (*htt
 	if err := antigravityDownstreamError(p.ctx); err != nil {
 		return nil, err
 	}
+	if p.tlsProfile != nil {
+		return p.httpUpstream.DoWithTLS(req, p.proxyURL, p.account.ID, p.account.Concurrency, p.tlsProfile)
+	}
 	return p.httpUpstream.Do(req, p.proxyURL, p.account.ID, p.account.Concurrency)
 }
 

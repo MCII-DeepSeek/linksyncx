@@ -36,7 +36,7 @@ func ClaudeSessionBudget(account *Account, defaultBudget int) int {
 	if account == nil || !account.IsAnthropicOAuthOrSetupToken() {
 		return 0
 	}
-	if account.IsSessionIDMaskingEnabled() {
+	if account.IsSingleSessionModeEnabled() {
 		return 1
 	}
 	if explicit := account.GetMaxSessions(); explicit > 0 {

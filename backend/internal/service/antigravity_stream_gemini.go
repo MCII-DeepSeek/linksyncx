@@ -88,7 +88,7 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 			line := strings.TrimRight(event.line, "\r\n")
 			if !strings.HasPrefix(line, "data:") {
 				if line != "" {
-					writer.Fprintf("%s\n", line)
+					writer.WriteLine(line)
 				}
 				continue
 			}
@@ -105,15 +105,16 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 			}
 			outer := gjson.Parse(payload)
 			outerError := outer.Get("error")
-			inner, err := s.unwrapV1InternalResponse([]byte(payload))
-			if err != nil {
-				return fail(err, "invalid upstream stream envelope")
+			frame := outer
+			innerStr := payload
+			if respField := outer.Get("response"); respField.Exists() {
+				frame = respField
+				innerStr = respField.Raw
 			}
-			frame := gjson.ParseBytes(inner)
 			if !frame.IsObject() {
 				return fail(errors.New("invalid upstream response object"), "invalid upstream response object")
 			}
-			if u := extractGeminiUsage(inner); u != nil {
+			if u := extractGeminiUsageFromFrame(frame); u != nil {
 				usage = u
 			}
 			if outerError.Exists() && outerError.Type != gjson.Null {
@@ -123,10 +124,12 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 				return fail(errors.New("upstream stream returned an error"), "upstream stream returned an error")
 			}
 			meaningful := false
-			for position, candidate := range frame.Get("candidates").Array() {
+			position := 0
+			frame.Get("candidates").ForEach(func(_, candidate gjson.Result) bool {
 				index := position
-				if candidate.Get("index").Exists() {
-					index = int(candidate.Get("index").Int())
+				position++
+				if idxRes := candidate.Get("index"); idxRes.Exists() {
+					index = int(idxRes.Int())
 				}
 				complete, exists := finished[index]
 				if reason := candidate.Get("finishReason").String(); reason != "" && reason != "FINISH_REASON_UNSPECIFIED" {
@@ -139,12 +142,13 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 					meaningful = meaningful || part.Get("text").String() != "" || part.Get("functionCall").Exists() || part.Get("inlineData.data").String() != ""
 					return !meaningful
 				})
-			}
+				return true
+			})
 			if firstTokenMs == nil && meaningful {
 				ms := int(time.Since(startTime).Milliseconds())
 				firstTokenMs = &ms
 			}
-			writer.Fprintf("data: %s\n\n", inner)
+			writer.WriteSSEData([]byte(innerStr))
 		case <-timeoutCh:
 			return fail(errors.New("stream data interval timeout"), "stream_timeout")
 		case <-keepaliveCh:
@@ -152,5 +156,33 @@ func (s *AntigravityGatewayService) handleGeminiStreamingResponse(c *gin.Context
 				writer.Write([]byte(":\n\n"))
 			}
 		}
+	}
+}
+
+func extractGeminiUsageFromFrame(frame gjson.Result) *ClaudeUsage {
+	usage := frame.Get("usageMetadata")
+	if !usage.Exists() {
+		return nil
+	}
+	prompt := int(usage.Get("promptTokenCount").Int())
+	cand := int(usage.Get("candidatesTokenCount").Int())
+	cached := int(usage.Get("cachedContentTokenCount").Int())
+	thoughts := int(usage.Get("thoughtsTokenCount").Int())
+
+	imageTokens := 0
+	if candidateDetails := usage.Get("candidatesTokensDetails"); candidateDetails.Exists() {
+		candidateDetails.ForEach(func(_, detail gjson.Result) bool {
+			if detail.Get("modality").String() == "IMAGE" {
+				imageTokens = int(detail.Get("tokenCount").Int())
+				return false
+			}
+			return true
+		})
+	}
+	return &ClaudeUsage{
+		InputTokens:          prompt - cached,
+		OutputTokens:         cand + thoughts,
+		CacheReadInputTokens: cached,
+		ImageOutputTokens:    imageTokens,
 	}
 }

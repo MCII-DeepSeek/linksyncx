@@ -22,6 +22,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -528,8 +529,15 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		testModelID = claude.DefaultTestModel
 	}
 
-	// API Key 账号测试连接时也需要应用通配符模型映射。
-	if account.Type == "apikey" {
+	// API Key / Antigravity Upstream 中转账号测试连接时也需要应用通配符模型映射；
+	// 若账号显式配置了白名单/映射且未指定 modelID、默认测试模型又不在允许列表内，优先选取首个精确受支持模型。
+	isAntigravityUpstream := account.Platform == PlatformAntigravity && account.Type == AccountTypeUpstream
+	if account.Type == AccountTypeAPIKey || isAntigravityUpstream {
+		if strings.TrimSpace(modelID) == "" && !account.IsModelSupported(testModelID) {
+			if fallback := pickFirstExactAccountModel(account); fallback != "" {
+				testModelID = fallback
+			}
+		}
 		testModelID = account.GetMappedModel(testModelID)
 	}
 	// Anthropic OAuth/SetupToken 账号同样按账号级模型限制（白名单/映射）解析，与实际转发一致。
@@ -555,21 +563,33 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		if authToken == "" {
 			return s.sendErrorAndEnd(c, "No access token available")
 		}
-	} else if account.Type == "apikey" {
+	} else if account.Type == AccountTypeAPIKey || isAntigravityUpstream {
 		authToken = account.GetCredential("api_key")
 		if authToken == "" {
 			return s.sendErrorAndEnd(c, "No API key available")
 		}
 
-		baseURL := account.GetBaseURL()
-		if baseURL == "" {
-			baseURL = "https://api.anthropic.com"
+		var baseURL string
+		if isAntigravityUpstream {
+			baseURL = strings.TrimSpace(account.GetCredential("base_url"))
+			if baseURL == "" {
+				return s.sendErrorAndEnd(c, "No base URL available")
+			}
+		} else {
+			baseURL = account.GetBaseURL()
+			if baseURL == "" {
+				baseURL = "https://api.anthropic.com"
+			}
 		}
 		normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
 		if err != nil {
 			return s.sendErrorAndEnd(c, fmt.Sprintf("Invalid base URL: %s", err.Error()))
 		}
-		apiURL = strings.TrimSuffix(normalizedBaseURL, "/") + "/v1/messages?beta=true"
+		if isAntigravityUpstream {
+			apiURL = strings.TrimSuffix(normalizedBaseURL, "/") + "/v1/messages"
+		} else {
+			apiURL = strings.TrimSuffix(normalizedBaseURL, "/") + "/v1/messages?beta=true"
+		}
 	} else {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Unsupported account type: %s", account.Type))
 	}
@@ -611,6 +631,9 @@ func (s *AccountTestService) testClaudeAccountConnection(c *gin.Context, account
 		req.Header.Set("Authorization", "Bearer "+authToken)
 		// 账号级设备画像：测试请求与真实转发呈现同一台设备
 		applyClaudeDeviceProfileHeaders(req.Header, account)
+	} else if isAntigravityUpstream {
+		req.Header.Set("Authorization", "Bearer "+authToken)
+		req.Header.Set("x-api-key", authToken)
 	} else {
 		req.Header.Set("anthropic-beta", claude.APIKeyBetaHeader)
 		// Ollama Cloud Anthropic 兼容端点按实际 base_url 强制 Bearer，
@@ -2470,15 +2493,7 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 		testModelID = geminicli.DefaultTestModel
 	}
 
-	// For static upstream credentials with model mapping, map the model
-	if account.Type == AccountTypeAPIKey || account.Type == AccountTypeServiceAccount {
-		mapping := account.GetModelMapping()
-		if len(mapping) > 0 {
-			if mappedModel, exists := mapping[testModelID]; exists {
-				testModelID = mappedModel
-			}
-		}
-	}
+	testModelID = nativeGeminiModel(account, testModelID, nil)
 
 	// Set SSE headers
 	c.Writer.Header().Set("Content-Type", "text/event-stream")
@@ -2495,7 +2510,7 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 	var err error
 
 	switch account.Type {
-	case AccountTypeAPIKey:
+	case AccountTypeAPIKey, AccountTypeUpstream:
 		req, err = s.buildGeminiAPIKeyRequest(ctx, account, testModelID, payload)
 	case AccountTypeOAuth:
 		req, err = s.buildGeminiOAuthRequest(ctx, account, testModelID, payload)
@@ -2535,15 +2550,72 @@ func (s *AccountTestService) testGeminiAccountConnection(c *gin.Context, account
 }
 
 // routeAntigravityTest 路由 Antigravity 账号的测试请求。
-// APIKey 类型走原生协议（与 gateway_handler 路由一致），OAuth/Upstream 走 CRS 中转。
+// APIKey / Upstream 中转类型走中转协议（支持请求头覆写与 TLS 指纹），OAuth 走官方 v1internal 链路。
 func (s *AccountTestService) routeAntigravityTest(c *gin.Context, account *Account, modelID string, prompt string) error {
-	if account.Type == AccountTypeAPIKey {
-		if strings.HasPrefix(modelID, "gemini-") {
-			return s.testGeminiAccountConnection(c, account, modelID, prompt)
+	if account.Type == AccountTypeAPIKey || account.Type == AccountTypeUpstream {
+		effectiveModel := resolveAntigravityRelayTestModel(account, modelID)
+		if strings.HasPrefix(effectiveModel, "gemini-") || strings.HasPrefix(account.GetMappedModel(effectiveModel), "gemini-") {
+			return s.testGeminiAccountConnection(c, account, effectiveModel, prompt)
 		}
-		return s.testClaudeAccountConnection(c, account, modelID)
+		return s.testClaudeAccountConnection(c, account, effectiveModel)
 	}
 	return s.testAntigravityAccountConnection(c, account, modelID, prompt)
+}
+
+func resolveAntigravityRelayTestModel(account *Account, modelID string) string {
+	trimmed := strings.TrimSpace(modelID)
+	if trimmed != "" || account == nil {
+		return trimmed
+	}
+	if len(rawAntigravityModelMapping(account)) > 0 {
+		if account.IsModelSupported(claude.DefaultTestModel) {
+			return claude.DefaultTestModel
+		}
+		if exact := pickFirstExactAccountModel(account); exact != "" {
+			return exact
+		}
+	}
+	if ids, _ := account.AntigravityObservedModelIDs(); len(ids) > 0 {
+		for _, id := range ids {
+			if id == claude.DefaultTestModel {
+				return id
+			}
+		}
+		for _, id := range ids {
+			id = strings.TrimSpace(id)
+			if id != "" && !strings.Contains(id, "*") {
+				return id
+			}
+		}
+	}
+	return ""
+}
+
+func pickFirstExactAccountModel(account *Account) string {
+	if account == nil {
+		return ""
+	}
+	var keys []string
+	if account.Platform == PlatformAntigravity {
+		for k := range rawAntigravityModelMapping(account) {
+			k = strings.TrimSpace(k)
+			if k != "" && !strings.Contains(k, "*") {
+				keys = append(keys, k)
+			}
+		}
+	} else {
+		for k := range account.GetModelMapping() {
+			k = strings.TrimSpace(k)
+			if k != "" && !strings.Contains(k, "*") {
+				keys = append(keys, k)
+			}
+		}
+	}
+	if len(keys) == 0 {
+		return ""
+	}
+	sort.Strings(keys)
+	return keys[0]
 }
 
 // testAntigravityAccountConnection tests an Antigravity account's connection
@@ -2594,35 +2666,7 @@ func antigravityConnectionTestModel(modelID string) string {
 
 // buildGeminiAPIKeyRequest builds request for Gemini API Key accounts
 func (s *AccountTestService) buildGeminiAPIKeyRequest(ctx context.Context, account *Account, modelID string, payload []byte) (*http.Request, error) {
-	apiKey := account.GetCredential("api_key")
-	if strings.TrimSpace(apiKey) == "" {
-		return nil, fmt.Errorf("no API key available")
-	}
-
-	baseURL := account.GetCredential("base_url")
-	if baseURL == "" {
-		baseURL = geminicli.AIStudioBaseURL
-	}
-	normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
-	if err != nil {
-		return nil, err
-	}
-
-	// Use streamGenerateContent for real-time feedback
-	fullURL, err := buildGeminiAIStudioModelActionURL(normalizedBaseURL, modelID, "streamGenerateContent", true)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", fullURL, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-goog-api-key", apiKey)
-
-	return req, nil
+	return newGeminiAPIKeyRequest(ctx, account, modelID, "streamGenerateContent", true, payload, s.validateUpstreamBaseURL)
 }
 
 // buildGeminiOAuthRequest builds request for Gemini OAuth accounts
@@ -3291,7 +3335,7 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 	if proxyErr != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Proxy unavailable: %s", proxyErr.Error()))
 	}
-	resp, err := s.doOpenAIAccountTestUpstream(req, proxyURL, account, false)
+	resp, err := s.doOpenAIAccountTestUpstream(req, proxyURL, account, true)
 	if err != nil {
 		return s.sendErrorAndEnd(c, fmt.Sprintf("Image upstream request failed: %s", err.Error()))
 	}

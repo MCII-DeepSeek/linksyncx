@@ -12,6 +12,7 @@ import (
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 )
 
 const (
@@ -28,13 +29,29 @@ const (
 
 // AntigravityQuotaFetcher 从 Antigravity API 获取额度
 type AntigravityQuotaFetcher struct {
-	proxyRepo ProxyRepository
-	cfg       *config.Config
+	proxyRepo           ProxyRepository
+	cfg                 *config.Config
+	tlsFPProfileService *TLSFingerprintProfileService
 }
 
 // NewAntigravityQuotaFetcher 创建 AntigravityQuotaFetcher
 func NewAntigravityQuotaFetcher(proxyRepo ProxyRepository, cfg *config.Config) *AntigravityQuotaFetcher {
 	return &AntigravityQuotaFetcher{proxyRepo: proxyRepo, cfg: cfg}
+}
+
+// SetTLSFingerprintProfileService 挂载 TLS 指纹模板服务（可选）。
+func (f *AntigravityQuotaFetcher) SetTLSFingerprintProfileService(svc *TLSFingerprintProfileService) {
+	if f == nil {
+		return
+	}
+	f.tlsFPProfileService = svc
+}
+
+func (f *AntigravityQuotaFetcher) resolveTLSProfile(account *Account) *tlsfingerprint.Profile {
+	if f == nil {
+		return resolveAntigravityAccountTLSProfile(nil, account)
+	}
+	return resolveAntigravityAccountTLSProfile(f.tlsFPProfileService, account)
 }
 
 // CanFetch 检查是否可以获取此账户的额度
@@ -52,9 +69,16 @@ func (f *AntigravityQuotaFetcher) FetchQuota(ctx context.Context, account *Accou
 	accessToken := account.GetCredential("access_token")
 	projectID := account.GetCredential("project_id")
 
-	client, err := antigravity.NewClient(proxyURL)
+	var accountID int64
+	if account != nil {
+		accountID = account.ID
+	}
+	client, err := antigravity.NewClientForAccount(proxyURL, accountID, f.resolveTLSProfile(account))
 	if err != nil {
 		return nil, fmt.Errorf("create antigravity client failed: %w", err)
+	}
+	if accountID <= 0 {
+		defer client.CloseIdleConnections()
 	}
 
 	// 调用 API 获取配额

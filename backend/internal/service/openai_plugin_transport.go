@@ -15,7 +15,23 @@ func (s *OpenAIGatewayService) doOpenAIUpstream(request *http.Request, proxyURL 
 			return response, err
 		}
 	}
-	return s.httpUpstream.Do(request, proxyURL, account.ID, account.Concurrency)
+	return s.doOpenAIHTTPWithTLS(request, proxyURL, account)
+}
+
+// doOpenAIHTTPWithTLS 在不经过 OAuth 插件拦截的附属 HTTP 请求上统一应用账号级 TLS 指纹配置。
+func (s *OpenAIGatewayService) doOpenAIHTTPWithTLS(request *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+	var accountID int64
+	var concurrency int
+	if account != nil {
+		accountID = account.ID
+		concurrency = account.Concurrency
+	}
+	if account != nil && s != nil && s.tlsFPProfileService != nil {
+		if profile := s.tlsFPProfileService.ResolveTLSProfile(account); profile != nil {
+			return s.httpUpstream.DoWithTLS(request, proxyURL, accountID, concurrency, profile)
+		}
+	}
+	return s.httpUpstream.Do(request, proxyURL, accountID, concurrency)
 }
 
 // doOpenAIAccountTestUpstream 让 OpenAI OAuth 账号测试与真实转发使用同一插件路径。

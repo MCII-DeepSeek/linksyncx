@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"compress/zlib"
 	"io"
 	"log/slog"
 	"net/http"
+
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"testing"
 
 	"github.com/andybalholm/brotli"
@@ -20,7 +23,7 @@ func TestDecompressResponseBodyZstdUsage(t *testing.T) {
 	compressed := compressZstd(t, payload)
 	resp := newEncodedResponse("zstd", compressed)
 
-	decompressResponseBody(resp)
+	httputil.DecompressResponseBody(resp)
 
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
@@ -43,14 +46,22 @@ func TestDecompressResponseBodyExistingEncodings(t *testing.T) {
 	}{
 		{name: "gzip", encoding: "gzip", compress: compressGzip},
 		{name: "brotli", encoding: "br", compress: compressBrotli},
-		{name: "deflate", encoding: "deflate", compress: compressDeflate},
+		{name: "raw deflate", encoding: "deflate", compress: compressDeflate},
+		{name: "zlib deflate", encoding: "deflate", compress: func(t *testing.T, data []byte) []byte {
+			var buf bytes.Buffer
+			w := zlib.NewWriter(&buf)
+			_, err := w.Write(data)
+			require.NoError(t, err)
+			require.NoError(t, w.Close())
+			return buf.Bytes()
+		}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			resp := newEncodedResponse(tt.encoding, tt.compress(t, payload))
 
-			decompressResponseBody(resp)
+			httputil.DecompressResponseBody(resp)
 
 			body, err := io.ReadAll(resp.Body)
 			require.NoError(t, err)
@@ -71,7 +82,7 @@ func TestDecompressResponseBodyWithoutEncodingLeavesBodyUntouched(t *testing.T) 
 		ContentLength: 5,
 	}
 
-	decompressResponseBody(resp)
+	httputil.DecompressResponseBody(resp)
 
 	require.Same(t, originalBody, resp.Body)
 	require.Equal(t, int64(5), resp.ContentLength)
@@ -93,7 +104,7 @@ func TestDecompressResponseBodyInvalidZstdWarnsAndPreservesBody(t *testing.T) {
 	resp := newEncodedResponse("zstd", payload)
 
 	require.NotPanics(t, func() {
-		decompressResponseBody(resp)
+		httputil.DecompressResponseBody(resp)
 	})
 
 	body, err := io.ReadAll(resp.Body)
@@ -116,7 +127,7 @@ func TestDecompressResponseBodyEmptyZstdWarnsAndPreservesBody(t *testing.T) {
 	resp := newEncodedResponse("zstd", nil)
 
 	require.NotPanics(t, func() {
-		decompressResponseBody(resp)
+		httputil.DecompressResponseBody(resp)
 	})
 
 	body, err := io.ReadAll(resp.Body)

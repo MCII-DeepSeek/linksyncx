@@ -1,10 +1,12 @@
 package service
 
 import (
-	"encoding/json"
+	"bytes"
+	"slices"
 	"strings"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
+	"github.com/tidwall/gjson"
 )
 
 // Gemini 原生请求（/v1beta/models/{model}:generateContent 等）经 Antigravity 账号转发时，
@@ -28,15 +30,6 @@ const (
 	geminiThinkingBudgetMediumMax = 8192
 )
 
-type geminiThinkingConfigProbe struct {
-	GenerationConfig struct {
-		ThinkingConfig *struct {
-			ThinkingBudget *json.Number `json:"thinkingBudget"`
-			ThinkingLevel  string       `json:"thinkingLevel"`
-		} `json:"thinkingConfig"`
-	} `json:"generationConfig"`
-}
-
 // hasGeminiThinkingVariantSuffix 判断模型名是否已经带了思考深度后缀。
 func hasGeminiThinkingVariantSuffix(model string) bool {
 	for _, suffix := range geminiThinkingVariantSuffixes {
@@ -47,18 +40,20 @@ func hasGeminiThinkingVariantSuffix(model string) bool {
 	return false
 }
 
-// geminiThinkingLevelFromBody 从 Gemini 原生请求体推导期望的思考档位（low/medium/high）。
+// geminiThinkingLevelFromBody 从 Gemini 原生请求体零反序列化提取期望的思考档位（low/medium/high）。
 // 解析失败或未携带 thinkingConfig 时返回 "high"。
 func geminiThinkingLevelFromBody(body []byte) string {
-	if len(body) == 0 {
+	if len(body) == 0 || !bytes.Contains(body, []byte("thinkingConfig")) {
 		return "high"
 	}
-	var probe geminiThinkingConfigProbe
-	if err := json.Unmarshal(body, &probe); err != nil || probe.GenerationConfig.ThinkingConfig == nil {
+	if !gjson.ValidBytes(body) {
 		return "high"
 	}
-	tc := probe.GenerationConfig.ThinkingConfig
-	switch strings.ToLower(strings.TrimSpace(tc.ThinkingLevel)) {
+	tc := gjson.GetBytes(body, "generationConfig.thinkingConfig")
+	if !tc.Exists() || !tc.IsObject() {
+		return "high"
+	}
+	switch strings.ToLower(strings.TrimSpace(tc.Get("thinkingLevel").String())) {
 	case "low":
 		return "low"
 	case "medium":
@@ -66,13 +61,11 @@ func geminiThinkingLevelFromBody(body []byte) string {
 	case "high":
 		return "high"
 	}
-	if tc.ThinkingBudget == nil {
+	budgetRes := tc.Get("thinkingBudget")
+	if !budgetRes.Exists() || budgetRes.Type != gjson.Number {
 		return "high"
 	}
-	budget, err := tc.ThinkingBudget.Float64()
-	if err != nil {
-		return "high"
-	}
+	budget := budgetRes.Float()
 	switch {
 	case budget < 0:
 		return "high" // -1 = 动态思考
@@ -114,9 +107,15 @@ func accountRawModelMappingHasKey(account *Account, key string) bool {
 	if account == nil || account.Credentials == nil {
 		return false
 	}
-	raw, _ := account.Credentials["model_mapping"].(map[string]any)
-	_, ok := raw[key]
-	return ok
+	switch raw := account.Credentials["model_mapping"].(type) {
+	case map[string]any:
+		_, ok := raw[key]
+		return ok
+	case map[string]string:
+		_, ok := raw[key]
+		return ok
+	}
+	return false
 }
 
 // resolveGeminiThinkingVariant 为裸 Gemini 模型名挑选账号映射表里存在的思考深度变体。
@@ -159,6 +158,22 @@ func resolveGeminiThinkingVariantForLevel(account *Account, requestedModel strin
 	for _, level := range []string{"high", "medium", "low", "tiered"} {
 		if level != preferred {
 			order = append(order, level)
+		}
+	}
+	if account.antigravityWhitelistEnabled() && len(rawAntigravityModelMapping(account)) > 0 {
+		return "", false
+	}
+	// A relay may publish a real bare model, or just one of the variants in the
+	// static defaults. Prefer what this account actually advertised.
+	if (account.Type == AccountTypeAPIKey || account.Type == AccountTypeUpstream) && len(rawAntigravityModelMapping(account)) == 0 {
+		ids, _ := account.AntigravityObservedModelIDs()
+		if slices.Contains(ids, model) {
+			return model, true
+		}
+		for _, level := range order {
+			if candidate := model + "-" + level; slices.Contains(ids, candidate) {
+				return candidate, true
+			}
 		}
 	}
 	for _, level := range order {

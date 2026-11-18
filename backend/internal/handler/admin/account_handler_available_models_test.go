@@ -863,3 +863,53 @@ func TestAccountHandlerSyncUpstreamModelsPreview_MissingProxyDoesNotGoDirect(t *
 	require.Empty(t, upstream.requests)
 	require.NotContains(t, rec.Body.String(), "relay-secret")
 }
+
+func TestAccountHandlerSyncUpstreamModelsPreview_HonorsWhitelistAndHeaderOverrides(t *testing.T) {
+	upstream := &syncUpstreamHTTPUpstream{resp: &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"data":[{"id":"claude-sonnet-4-6"},{"id":"gemini-3-flash"}]}`)),
+	}}
+	router := setupSyncUpstreamModelsRouter(newStubAdminService(), upstream)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/admin/accounts/models/sync-upstream-preview",
+		strings.NewReader(`{
+			"platform":"antigravity",
+			"type":"apikey",
+			"base_url":"https://relay.example",
+			"api_key":"relay-secret",
+			"model_restriction_mode":"whitelist",
+			"model_mapping":{"claude-sonnet-4-6":"claude-sonnet-4-6"},
+			"header_override_enabled":true,
+			"header_overrides":{"X-Relay-Gate":"gate-pass"}
+		}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotEmpty(t, upstream.requests)
+	require.Equal(t, []string{"gate-pass"}, upstream.requests[0].Header["x-relay-gate"])
+	require.Contains(t, rec.Body.String(), `"claude-sonnet-4-6"`)
+
+	// 黑名单请求头（如 Authorization）在预览阶段同样返回 400 拒绝
+	recBlocked := httptest.NewRecorder()
+	reqBlocked := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/admin/accounts/models/sync-upstream-preview",
+		strings.NewReader(`{
+			"platform":"antigravity",
+			"type":"apikey",
+			"base_url":"https://relay.example",
+			"api_key":"relay-secret",
+			"header_override_enabled":true,
+			"header_overrides":{"Authorization":"Bearer forged"}
+		}`),
+	)
+	reqBlocked.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(recBlocked, reqBlocked)
+	require.Equal(t, http.StatusBadRequest, recBlocked.Code)
+}

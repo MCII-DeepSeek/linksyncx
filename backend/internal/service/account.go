@@ -593,6 +593,12 @@ func stringMappingFromRaw(raw any) map[string]string {
 	}
 }
 
+const AntigravityModelRestrictionModeKey = "model_restriction_mode"
+
+func (a *Account) antigravityWhitelistEnabled() bool {
+	return a.Platform == PlatformAntigravity && a.GetCredential(AntigravityModelRestrictionModeKey) == "whitelist"
+}
+
 func (a *Account) GetModelMapping() map[string]string {
 	runtimeVersion := xai.RuntimeModelMappingVersion()
 	if a.Platform == domain.PlatformAntigravity {
@@ -600,6 +606,13 @@ func (a *Account) GetModelMapping() map[string]string {
 	}
 	credentialsPtr := mapPtr(a.Credentials)
 	rawMapping, _ := a.Credentials["model_mapping"].(map[string]any)
+	if typed, ok := a.Credentials["model_mapping"].(map[string]string); ok {
+		rawMapping = make(map[string]any, len(typed))
+		for key, value := range typed {
+			rawMapping[key] = value
+		}
+		return a.resolveModelMapping(rawMapping)
+	}
 	rawPtr := mapPtr(rawMapping)
 	rawLen := len(rawMapping)
 	rawSig := uint64(0)
@@ -666,7 +679,7 @@ func (a *Account) resolveModelMapping(rawMapping map[string]any) map[string]stri
 		}
 	}
 	if len(result) > 0 {
-		if a.Platform == domain.PlatformAntigravity {
+		if a.Platform == domain.PlatformAntigravity && !a.antigravityWhitelistEnabled() {
 			ensureAntigravityDefaultPassthroughs(result, []string{
 				"gemini-3-flash",
 				"gemini-3.1-pro-high",
@@ -940,6 +953,9 @@ func (a *Account) IsModelSupported(requestedModel string) bool {
 	if mappingSupportsRequestedModel(mapping, requestedModel) {
 		return !a.grokExcludesBuildOnlyModel(requestedModel)
 	}
+	if a.antigravityWhitelistEnabled() && len(rawAntigravityModelMapping(a)) > 0 {
+		return false
+	}
 	normalized := normalizeRequestedModelForLookup(a.Platform, requestedModel)
 	return normalized != requestedModel && mappingSupportsRequestedModel(mapping, normalized) &&
 		!a.grokExcludesBuildOnlyModel(normalized)
@@ -984,6 +1000,9 @@ func (a *Account) ResolveMappedModel(requestedModel string) (mappedModel string,
 	}
 	if mappedModel, matched := resolveRequestedModelInMapping(mapping, requestedModel); matched {
 		return mappedModel, true
+	}
+	if a.antigravityWhitelistEnabled() && len(rawAntigravityModelMapping(a)) > 0 {
+		return requestedModel, false
 	}
 	normalized := normalizeRequestedModelForLookup(a.Platform, requestedModel)
 	if normalized != requestedModel {
@@ -2547,26 +2566,38 @@ func (a *Account) IsAntigravityOAuthOrSetupToken() bool {
 	return a.Platform == PlatformAntigravity && (a.Type == AccountTypeOAuth || a.Type == AccountTypeSetupToken)
 }
 
-// IsTLSFingerprintEnabled 检查是否启用 TLS 指纹伪装
-// 仅适用于 Anthropic OAuth/SetupToken 类型账号
-// 启用后将模拟 Claude Code 2.1.280（Bun）客户端的 TLS 握手特征
-// （JA3 1523504b38f0fae0d881d4b6554aac1b，本机抓包实测）
+// IsTLSFingerprintEnabled 检查是否启用 TLS 指纹伪装。
+//   - Anthropic OAuth/SetupToken：a.Extra 非 nil 时默认开启（复刻 Claude Code Bun ClientHello），显式 false 关闭；
+//   - Antigravity / OpenAI 等其他平台：显式 opt-in（Extra["enable_tls_fingerprint"] == true 时开启，缺省保持平台原生 HTTP/2 栈）。
 func (a *Account) IsTLSFingerprintEnabled() bool {
-	// 仅支持 Anthropic OAuth/SetupToken 账号
-	if !a.IsAnthropicOAuthOrSetupToken() {
+	if a == nil || a.Extra == nil {
 		return false
 	}
-	if a.Extra == nil {
-		return false
+	if a.IsAnthropicOAuthOrSetupToken() {
+		if v, ok := a.Extra["enable_tls_fingerprint"]; ok {
+			if enabled, ok := v.(bool); ok {
+				return enabled
+			}
+		}
+		return true
 	}
-	if v, ok := a.Extra["enable_tls_fingerprint"]; ok {
-		if enabled, ok := v.(bool); ok {
-			return enabled
+	switch a.Platform {
+	case PlatformAntigravity, PlatformOpenAI, PlatformPerplexity:
+		if v, ok := a.Extra["enable_tls_fingerprint"]; ok {
+			if enabled, ok := v.(bool); ok {
+				return enabled
+			}
+		}
+	case PlatformAnthropic:
+		if a.Type == AccountTypeAPIKey {
+			if v, ok := a.Extra["enable_tls_fingerprint"]; ok {
+				if enabled, ok := v.(bool); ok {
+					return enabled
+				}
+			}
 		}
 	}
-	// 默认开启（2.1.280 Bun spec 已逐字节对齐真实客户端；显式 false 仍可关闭）：
-	// 关闭状态下出站是 Go 默认 ClientHello，与 Claude Code 流量特征差异明显。
-	return true
+	return false
 }
 
 // GetTLSFingerprintProfileID 获取账号绑定的 TLS 指纹模板 ID
@@ -2673,11 +2704,10 @@ func (a *Account) GetUserMsgQueueMode() string {
 }
 
 // IsSessionIDMaskingEnabled 检查是否启用会话ID伪装
-// 仅适用于 Anthropic OAuth/SetupToken 类型账号
-// 启用后将在一段时间内（15分钟）固定 metadata.user_id 中的 session ID，
-// 使上游认为请求来自同一个会话
+// 适用于 Anthropic / Antigravity OAuth 或 SetupToken 类型账号：
+// 启用后将在一段时间内（15分钟）固定上游请求中的会话标识，隐藏多人共享同一账号的会话突发特征。
 func (a *Account) IsSessionIDMaskingEnabled() bool {
-	if !a.IsAnthropicOAuthOrSetupToken() {
+	if a == nil || (!a.IsAnthropicOAuthOrSetupToken() && !a.IsAntigravityOAuthOrSetupToken()) {
 		return false
 	}
 	if a.Extra == nil {
@@ -2689,6 +2719,12 @@ func (a *Account) IsSessionIDMaskingEnabled() bool {
 		}
 	}
 	return false
+}
+
+// IsSingleSessionModeEnabled 检查是否启用 Claude 单会话预算与账号级队列串行模式。
+// 仅适用于 Anthropic OAuth/SetupToken（Antigravity 的 session_id_masking_enabled 仅收敛出站会话 ID，不将并发预算压为 1）。
+func (a *Account) IsSingleSessionModeEnabled() bool {
+	return a != nil && a.IsAnthropicOAuthOrSetupToken() && a.IsSessionIDMaskingEnabled()
 }
 
 // IsCustomBaseURLEnabled 检查是否启用自定义 base URL 中继转发

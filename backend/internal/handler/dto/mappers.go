@@ -312,20 +312,6 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 		if mode := a.GetUserMsgQueueMode(); mode != "" {
 			out.UserMsgQueueMode = &mode
 		}
-		// TLS指纹伪装开关
-		if a.IsTLSFingerprintEnabled() {
-			enabled := true
-			out.EnableTLSFingerprint = &enabled
-		}
-		// TLS指纹模板ID
-		if profileID := a.GetTLSFingerprintProfileID(); profileID > 0 {
-			out.TLSFingerprintProfileID = &profileID
-		}
-		// 会话ID伪装开关
-		if a.IsSessionIDMaskingEnabled() {
-			enabled := true
-			out.EnableSessionIDMasking = &enabled
-		}
 		// 缓存 TTL 强制替换
 		if a.IsCacheTTLOverrideEnabled() {
 			enabled := true
@@ -341,6 +327,19 @@ func AccountFromServiceShallow(a *service.Account) *Account {
 				out.CustomBaseURL = &customURL
 			}
 		}
+	}
+
+	// TLS 指纹与会话 ID 伪装开关（适用于 Anthropic / Antigravity / OpenAI 等支持账号）
+	if a.IsTLSFingerprintEnabled() {
+		enabled := true
+		out.EnableTLSFingerprint = &enabled
+	}
+	if profileID := a.GetTLSFingerprintProfileID(); profileID > 0 || profileID == -1 {
+		out.TLSFingerprintProfileID = &profileID
+	}
+	if a.IsSessionIDMaskingEnabled() {
+		enabled := true
+		out.EnableSessionIDMasking = &enabled
 	}
 
 	// 提取账号配额限制（apikey / bedrock 类型有效）

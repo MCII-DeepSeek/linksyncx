@@ -1,10 +1,7 @@
 package repository
 
 import (
-	"bufio"
 	"bytes"
-	"compress/flate"
-	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -22,11 +19,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/andybalholm/brotli"
-	"github.com/klauspost/compress/zstd"
 	"golang.org/x/net/http2"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/httputil"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/httpwire"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyurl"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/proxyutil"
@@ -302,7 +298,7 @@ func doUpstreamRequest(client *http.Client, req *http.Request) (*http.Response, 
 		cancel()
 		return resp, err
 	}
-	decompressResponseBody(resp)
+	httputil.DecompressResponseBody(resp)
 	resp.Body = &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancel}
 	return resp, nil
 }
@@ -543,8 +539,12 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 	// 下一个请求就按新模板建池，不必等重启或空闲回收。前半段仍按配置的隔离模式组成——
 	// proxy 模式下同代理、同模板的账号继续共享一个池，不同模板各用各的池，不会再借用别的
 	// 账号的 ClientHello。旧摘要的池没人再用，由 evictIdleLocked / LRU 淘汰。
-	cacheKey := "tls:" + buildCacheKey(isolation, proxyKey, accountID, upstreamProtocolModeDefault) + "|fp:" + tlsfingerprint.ProfileCacheKey(profile)
-	poolKey := buildPoolKey(settings, upstreamProtocolModeDefault) + ":tls"
+	tlsProfileMode := upstreamProtocolModeDefault
+	if upstreamProfile != "" && upstreamProfile != service.HTTPUpstreamProfileDefault {
+		tlsProfileMode = string(upstreamProfile)
+	}
+	cacheKey := "tls:" + buildCacheKey(isolation, proxyKey, accountID, tlsProfileMode) + "|fp:" + tlsfingerprint.ProfileCacheKey(profile)
+	poolKey := buildPoolKey(settings, tlsProfileMode) + ":tls"
 
 	now := time.Now()
 	nowUnix := now.UnixNano()
@@ -593,9 +593,9 @@ func (s *httpUpstreamService) getClientEntryWithTLS(proxyURL string, accountID i
 		}
 	}
 
-	// 创建带 TLS 指纹的 Transport
+	// 创建带 TLS 指纹的 Transport（声明 h2 ALPN 时启用 uTLS + HTTP/2 多路复用，否则保持 Bun HTTP/1.1 形态）
 	slog.Debug("tls_fingerprint_creating_new_client", "account_id", accountID, "cache_key", cacheKeyLogValue(cacheKey), "proxy", proxyLogValue(proxyKey))
-	transport, err := buildUpstreamTransportWithTLSFingerprint(settings, parsedProxy, profile, s.tlsDialOptions())
+	transport, err := buildUpstreamRoundTripperWithTLSFingerprint(settings, parsedProxy, profile, s.tlsDialOptions())
 	if err != nil {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("build TLS fingerprint transport: %w", err)
@@ -1460,6 +1460,21 @@ func enableHTTP2KeepAlive(transport *http.Transport, protocolMode string) (*http
 //
 // Accept-Encoding：关闭 net/http 自动追加的 "gzip"，调用方未设置时由 httpwire 补
 // Bun 默认值 "gzip, deflate, br, zstd"；响应统一在 decompressResponseBody 解压。
+func buildUpstreamRoundTripperWithTLSFingerprint(settings poolSettings, proxyURL *url.URL, profile *tlsfingerprint.Profile, dialOpts tlsfingerprint.DialOptions) (http.RoundTripper, error) {
+	if tlsfingerprint.ProfileSupportsHTTP2(profile) {
+		return tlsfingerprint.NewHTTP2CapableTransport(profile, proxyURL, dialOpts, tlsfingerprint.HTTP2TransportConfig{
+			MaxIdleConns:          settings.maxIdleConns,
+			MaxIdleConnsPerHost:   settings.maxIdleConnsPerHost,
+			MaxConnsPerHost:       settings.maxConnsPerHost,
+			IdleConnTimeout:       settings.idleConnTimeout,
+			ResponseHeaderTimeout: settings.responseHeaderTimeout,
+			ReadIdleTimeout:       longStreamHTTP2ReadIdleTimeout,
+			PingTimeout:           longStreamHTTP2PingTimeout,
+		})
+	}
+	return buildUpstreamTransportWithTLSFingerprint(settings, proxyURL, profile, dialOpts)
+}
+
 func buildUpstreamTransportWithTLSFingerprint(settings poolSettings, proxyURL *url.URL, profile *tlsfingerprint.Profile, dialOpts tlsfingerprint.DialOptions) (*http.Transport, error) {
 	dialer, err := tlsfingerprint.NewProxyDialer(profile, proxyURL, dialOpts)
 	if err != nil {
@@ -1520,89 +1535,4 @@ func wrapTrackedBody(body io.ReadCloser, onClose func()) io.ReadCloser {
 		return body
 	}
 	return &trackedBody{ReadCloser: body, onClose: onClose}
-}
-
-// decompressResponseBody 根据 Content-Encoding 解压响应体。
-// 当请求显式设置了 accept-encoding 时，Go 的 Transport 不会自动解压，需要手动处理。
-// 解压成功后会删除 Content-Encoding 和 Content-Length header（长度已不准确）。
-func decompressResponseBody(resp *http.Response) {
-	if resp == nil || resp.Body == nil {
-		return
-	}
-	ce := strings.ToLower(strings.TrimSpace(resp.Header.Get("Content-Encoding")))
-	if ce == "" {
-		return
-	}
-
-	originalBody := resp.Body
-	var reader io.Reader
-	switch ce {
-	case "gzip":
-		gr, err := gzip.NewReader(resp.Body)
-		if err != nil {
-			return // 解压失败，保持原样
-		}
-		reader = gr
-	case "br":
-		reader = brotli.NewReader(resp.Body)
-	case "deflate":
-		reader = flate.NewReader(resp.Body)
-	case "zstd":
-		bufferedBody := bufio.NewReader(resp.Body)
-		resp.Body = &decompressedBody{reader: bufferedBody, closer: originalBody}
-
-		headerBytes, _ := bufferedBody.Peek(zstd.HeaderMaxSize)
-		var header zstd.Header
-		if err := header.Decode(headerBytes); err != nil {
-			slog.Warn("zstd_decompress_failed", "error", err)
-			return
-		}
-
-		zr, err := zstd.NewReader(bufferedBody)
-		if err != nil {
-			slog.Warn("zstd_decompress_failed", "error", err)
-			return
-		}
-		reader = &zstdResponseReader{ReadCloser: zr.IOReadCloser()}
-	default:
-		return
-	}
-
-	resp.Body = &decompressedBody{reader: reader, closer: originalBody}
-	resp.Header.Del("Content-Encoding")
-	resp.Header.Del("Content-Length") // 解压后长度不确定
-	resp.ContentLength = -1
-}
-
-type zstdResponseReader struct {
-	io.ReadCloser
-	warnOnce sync.Once
-}
-
-func (r *zstdResponseReader) Read(p []byte) (int, error) {
-	n, err := r.ReadCloser.Read(p)
-	if err != nil && !errors.Is(err, io.EOF) {
-		r.warnOnce.Do(func() {
-			slog.Warn("zstd_decompress_failed", "error", err)
-		})
-	}
-	return n, err
-}
-
-// decompressedBody 组合解压 reader 和原始 body 的 close。
-type decompressedBody struct {
-	reader io.Reader
-	closer io.Closer
-}
-
-func (d *decompressedBody) Read(p []byte) (int, error) {
-	return d.reader.Read(p)
-}
-
-func (d *decompressedBody) Close() error {
-	// 如果 reader 本身也是 Closer（如 gzip.Reader），先关闭它
-	if rc, ok := d.reader.(io.Closer); ok {
-		_ = rc.Close()
-	}
-	return d.closer.Close()
 }

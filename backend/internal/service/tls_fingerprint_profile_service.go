@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -210,24 +211,112 @@ func (s *TLSFingerprintProfileService) GetProfileByID(id int64) *tlsfingerprint.
 // 若参与选择，落在它上面的约 1/N 个账号会被永久钉住、每个请求都失败（这类错误不触发临时下线，
 // 粘性会话还会在原账号上反复重试）。剔除它等价于它不存在，其余账号的选择不受影响；校验是模板的
 // 纯函数，多实例的候选集合一致，选择仍然一致。没有任何有效模板时返回 nil，回落到内置默认 profile。
-func (s *TLSFingerprintProfileService) stickyProfileForAccount(accountID int64) *tlsfingerprint.Profile {
+func (s *TLSFingerprintProfileService) stickyProfileForAccount(account *Account) *tlsfingerprint.Profile {
+	if s == nil || account == nil {
+		return nil
+	}
+	preferredOS := accountPreferredTLSOS(account)
+
 	s.localMu.RLock()
 	defer s.localMu.RUnlock()
 
+	if preferredOS != "" {
+		if chosen := pickRendezvousTLSProfile(account.ID, s.randomCandidates, preferredOS); chosen != nil {
+			return chosen.ToTLSProfile()
+		}
+	}
+	if chosen := pickRendezvousTLSProfile(account.ID, s.randomCandidates, ""); chosen != nil {
+		return chosen.ToTLSProfile()
+	}
+	return nil
+}
+
+func pickRendezvousTLSProfile(accountID int64, candidates []*model.TLSFingerprintProfile, preferredOS string) *model.TLSFingerprintProfile {
 	var (
 		chosen     *model.TLSFingerprintProfile
 		bestWeight uint64
 	)
-	for _, p := range s.randomCandidates {
+	for _, p := range candidates {
+		if preferredOS != "" {
+			if hint := tlsTemplateOSHint(p.Name); hint != "" && hint != preferredOS {
+				continue
+			}
+		}
 		weight := tlsProfileRendezvousWeight(accountID, p.ID)
 		if chosen == nil || weight > bestWeight || (weight == bestWeight && p.ID < chosen.ID) {
 			chosen, bestWeight = p, weight
 		}
 	}
-	if chosen == nil {
-		return nil
+	return chosen
+}
+
+// accountPreferredTLSOS 提取账号设备画像所声明的操作系统（"darwin" / "windows" / "linux"），
+// 用于在“随机”选择 TLS 模板时避开与 User-Agent / Client-Metadata 明显跨平台矛盾的专属模板。
+func accountPreferredTLSOS(account *Account) string {
+	if account == nil {
+		return ""
 	}
-	return chosen.ToTLSProfile()
+	switch account.Platform {
+	case PlatformAntigravity:
+		if dp := account.AntigravityDeviceProfile(); dp.OS != "" {
+			return canonicalTLSOS(dp.OS)
+		}
+		if account.IsAntigravityOAuthOrSetupToken() {
+			// 未显式钉住设备时，Antigravity OAuth 出站 UA (windows/amd64)、Client-Metadata (WINDOWS)
+			// 与请求体 Platform (WINDOWS_AMD64) 均固定呈现 Windows；优先选择匹配的 Windows 模板。
+			return "windows"
+		}
+	case PlatformAnthropic:
+		if dp := account.ClaudeDeviceProfile(); dp.OS != "" {
+			return canonicalTLSOS(dp.OS)
+		}
+	case PlatformOpenAI:
+		if ua := account.GetOpenAIUserAgent(); ua != "" {
+			return tlsTemplateOSHint(ua)
+		}
+	}
+	return ""
+}
+
+func canonicalTLSOS(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "macos", "darwin":
+		return "darwin"
+	case "windows", "win32", "win64":
+		return "windows"
+	case "linux":
+		return "linux"
+	default:
+		return ""
+	}
+}
+
+func tlsTemplateOSHint(text string) string {
+	lower := strings.ToLower(text)
+	hasMac := strings.Contains(lower, "macos") || strings.Contains(lower, "mac os") || strings.Contains(lower, "darwin")
+	hasWin := strings.Contains(lower, "windows") || strings.Contains(lower, "win32") || strings.Contains(lower, "win64")
+	hasLin := strings.Contains(lower, "linux") || strings.Contains(lower, "ubuntu") || strings.Contains(lower, "debian")
+	count := 0
+	if hasMac {
+		count++
+	}
+	if hasWin {
+		count++
+	}
+	if hasLin {
+		count++
+	}
+	if count != 1 {
+		return ""
+	}
+	switch {
+	case hasMac:
+		return "darwin"
+	case hasWin:
+		return "windows"
+	default:
+		return "linux"
+	}
 }
 
 // tlsProfileRendezvousWeight 把 (账号 ID, 模板 ID) 混合成 64 位权重。splitmix64 终结器雪崩充分，
@@ -256,22 +345,39 @@ func (s *TLSFingerprintProfileService) ResolveTLSProfile(account *Account) *tlsf
 		return nil
 	}
 	id := account.GetTLSFingerprintProfileID()
-	if id > 0 {
+	if id > 0 && s != nil {
 		// 显式绑定的模板即使不自洽也原样返回，由 DoWithTLS 明确报错：这是管理员指定的设备，
 		// 悄悄换成别的模板会掩盖配置错误，也会在管理员不知情时改变账号的指纹。
 		if p := s.GetProfileByID(id); p != nil {
-			return p
+			return adaptTLSProfileForAccount(account, p)
 		}
 	}
 	if id == -1 {
 		// “随机”按账号固定：每个账号确定性地落在一个模板上，而不是每个请求重新抽取。
-		// 未绑定（id = 0）的路径不访问 s，对 nil 接收者仍然安全；本分支与 id > 0 分支一样需要已初始化的服务。
-		if p := s.stickyProfileForAccount(account.ID); p != nil {
-			return p
+		// 未绑定（id = 0）的路径不访问 s，对 nil 接收者仍然安全；本分支对 nil 接收者回落内置默认。
+		if p := s.stickyProfileForAccount(account); p != nil {
+			return adaptTLSProfileForAccount(account, p)
 		}
 	}
 	// TLS 启用但无绑定 profile → 空 Profile → dialer 使用内置默认值
-	return &tlsfingerprint.Profile{Name: "Built-in Default (Node.js 24.x)"}
+	return adaptTLSProfileForAccount(account, &tlsfingerprint.Profile{Name: "Built-in Default (Node.js 24.x)"})
+}
+
+// adaptTLSProfileForAccount 按账号所属客户端的原生 HTTP 传输协议栈对齐 ALPN：
+//   - Anthropic OAuth/SetupToken（Claude Code Bun 客户端，仅讲 HTTP/1.1 + httpwire 头序）：
+//     剥离模板中的 "h2"，防止随机池或共享模板含 h2 时切入 Go HTTP/2 暴露非 Bun 帧指纹；
+//   - Antigravity OAuth/SetupToken 与 OpenAI（原生 HTTP/2 栈）：在模板未显式配置 ALPN 时默认补齐 ["h2", "http/1.1"]。
+func adaptTLSProfileForAccount(account *Account, profile *tlsfingerprint.Profile) *tlsfingerprint.Profile {
+	if account == nil || profile == nil {
+		return profile
+	}
+	if account.IsAnthropicOAuthOrSetupToken() {
+		return tlsfingerprint.WithoutHTTP2ALPN(profile)
+	}
+	if account.IsAntigravityOAuthOrSetupToken() || account.Platform == PlatformOpenAI {
+		return tlsfingerprint.WithDefaultHTTP2ALPN(profile)
+	}
+	return profile
 }
 
 // --- 缓存管理 ---

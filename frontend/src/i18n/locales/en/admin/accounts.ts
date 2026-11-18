@@ -1287,12 +1287,15 @@ export default {
         tlsFingerprint: {
           label: 'TLS Fingerprint Simulation',
           hint: 'Simulate Node.js/Claude Code client TLS fingerprint',
+          antigravityOAuthHint: 'Establish HTTP/2 connections with a custom uTLS ClientHello (keeps native HTTP/2 stack when disabled)',
+          antigravityRelayHint: 'Send relay requests with a custom uTLS fingerprint (defaults to Claude Code HTTP/1.1 shape; negotiates HTTP/2 when profile includes h2)',
           defaultProfile: 'Built-in Default',
           randomProfile: 'Random (fixed per account)'
         },
         sessionIdMasking: {
           label: 'Single-Session Mode',
-          hint: 'Conversations on this account share one session ID (15-minute sliding window) and the session limit becomes 1: one conversation at a time, other new conversations go to other accounts. Pair it with the serialize queue'
+          hint: 'Conversations on this account share one session ID (15-minute sliding window) and the session limit becomes 1: one conversation at a time, other new conversations go to other accounts. Pair it with the serialize queue',
+          antigravityHint: 'Converge outbound v1internal requests on this account onto a single canonical sessionId per 15-minute window'
         },
         cacheTTLOverride: {
           label: 'Cache TTL Override',

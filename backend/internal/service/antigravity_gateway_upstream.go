@@ -46,14 +46,17 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 	upstreamURL := baseURL + "/v1/messages"
 
 	// 能力维度 sanitize：Anthropic-compatible 上游透传路径也需要保证 body↔beta header
-	// 对称。客户端 anthropic-beta header 不含 context-management-2025-06-27 但 body 带
-	// context_management 时 strip，与 Anthropic 直连 / Bedrock / Vertex 路径保持一致。
-	clientBeta := c.GetHeader("anthropic-beta")
-	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, clientBeta); changed {
+	// 对称。若账号配置了 anthropic-beta 请求头覆写，以覆写值作为对称净化的最终准绳。
+	effectiveBeta := c.GetHeader("anthropic-beta")
+	if overrideBeta, ok := account.HeaderOverrideValue("anthropic-beta"); ok {
+		effectiveBeta = overrideBeta
+	}
+	if sanitized, changed := sanitizeAnthropicBodyForBetaTokens(body, effectiveBeta); changed {
 		body = sanitized
 	}
 
 	// 创建请求
+	ctx = WithHTTPUpstreamProfile(ctx, HTTPUpstreamProfileLongStream)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, upstreamURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("create upstream request: %w", err)
@@ -68,9 +71,15 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 	if v := c.GetHeader("anthropic-version"); v != "" {
 		req.Header.Set("anthropic-version", v)
 	}
-	if v := clientBeta; v != "" {
+	if v := effectiveBeta; v != "" {
 		req.Header.Set("anthropic-beta", v)
 	}
+	if req.Header.Get("Accept-Encoding") == "" {
+		req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	}
+
+	// 应用账号级请求头覆写（与 Claude / OpenAI API-Key 中转账号对齐）
+	account.ApplyHeaderOverrides(req.Header)
 
 	// 代理 URL（fail-closed：分配了代理但不可用时拒绝直连，避免出口 IP 泄漏）
 	proxyURL, proxyErr := account.ProxyURLForOutbound()
@@ -78,8 +87,13 @@ func (s *AntigravityGatewayService) ForwardUpstream(ctx context.Context, c *gin.
 		return nil, antigravityProxyUnavailableFailover(c, account, proxyErr, gatewayTransportFailoverBody)
 	}
 
-	// 发送请求
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	// 发送请求（支持账号级 TLS 指纹伪装）
+	var resp *http.Response
+	if tlsProfile := s.resolveTLSProfile(account); tlsProfile != nil {
+		resp, err = s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, tlsProfile)
+	} else {
+		resp, err = s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	}
 	if err != nil {
 		logger.LegacyPrintf("service.antigravity_gateway", "%s upstream request failed: %v", prefix, err)
 		return nil, fmt.Errorf("upstream request failed: %w", err)
@@ -167,10 +181,11 @@ func (s *AntigravityGatewayService) streamUpstreamResponse(c *gin.Context, resp 
 
 	scanner := bufio.NewScanner(resp.Body)
 	maxLineSize := defaultMaxLineSize
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
+	if s.settingService != nil && s.settingService.cfg != nil && s.settingService.cfg.Gateway.MaxLineSize > 0 {
 		maxLineSize = s.settingService.cfg.Gateway.MaxLineSize
 	}
-	scanner.Buffer(make([]byte, 64*1024), maxLineSize)
+	scanBuf := getSSEScannerBuf64K()
+	scanner.Buffer(scanBuf[:0], maxLineSize)
 
 	type scanEvent struct {
 		line string
@@ -189,6 +204,7 @@ func (s *AntigravityGatewayService) streamUpstreamResponse(c *gin.Context, resp 
 	var lastReadAt int64
 	atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
 	go func() {
+		defer putSSEScannerBuf64K(scanBuf)
 		defer close(events)
 		for scanner.Scan() {
 			atomic.StoreInt64(&lastReadAt, time.Now().UnixNano())
@@ -203,7 +219,7 @@ func (s *AntigravityGatewayService) streamUpstreamResponse(c *gin.Context, resp 
 	defer close(done)
 
 	streamInterval := time.Duration(0)
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.StreamDataIntervalTimeout > 0 {
+	if s.settingService != nil && s.settingService.cfg != nil && s.settingService.cfg.Gateway.StreamDataIntervalTimeout > 0 {
 		streamInterval = time.Duration(s.settingService.cfg.Gateway.StreamDataIntervalTimeout) * time.Second
 	}
 	var intervalTicker *time.Ticker
@@ -218,7 +234,7 @@ func (s *AntigravityGatewayService) streamUpstreamResponse(c *gin.Context, resp 
 
 	// 下游 keepalive：防止代理/Cloudflare Tunnel 因连接空闲而断开
 	keepaliveInterval := time.Duration(0)
-	if s.settingService.cfg != nil && s.settingService.cfg.Gateway.StreamKeepaliveInterval > 0 {
+	if s.settingService != nil && s.settingService.cfg != nil && s.settingService.cfg.Gateway.StreamKeepaliveInterval > 0 {
 		keepaliveInterval = time.Duration(s.settingService.cfg.Gateway.StreamKeepaliveInterval) * time.Second
 	}
 	var keepaliveTicker *time.Ticker
@@ -266,7 +282,7 @@ func (s *AntigravityGatewayService) streamUpstreamResponse(c *gin.Context, resp 
 			s.extractSSEUsage(line, usage)
 
 			// 透传行
-			cw.Fprintf("%s\n", line)
+			cw.WriteLine(line)
 
 		case <-intervalCh:
 			lastRead := time.Unix(0, atomic.LoadInt64(&lastReadAt))

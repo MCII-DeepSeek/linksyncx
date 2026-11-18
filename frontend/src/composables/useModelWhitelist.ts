@@ -571,3 +571,12 @@ export function buildModelMappingObject(
 
   return Object.keys(mapping).length > 0 ? mapping : null
 }
+
+export function buildAntigravityModelRestriction(
+  mode: 'whitelist' | 'mapping',
+  allowedModels: string[],
+  modelMappings: ModelMappingEntry[]
+) {
+  const mapping = buildModelMappingObject(mode, allowedModels, modelMappings)
+  return { model_restriction_mode: mode, ...(mapping ? { model_mapping: mapping } : {}) }
+}

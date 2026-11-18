@@ -21,10 +21,12 @@ import (
 	"time"
 
 	"github.com/Wei-Shaw/sub2api/internal/config"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/ctxkey"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/geminicli"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/googleapi"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
 	"github.com/Wei-Shaw/sub2api/internal/util/responseheaders"
 	"github.com/Wei-Shaw/sub2api/internal/util/urlvalidator"
 
@@ -64,6 +66,7 @@ type GeminiMessagesCompatService struct {
 	rateLimitService          *RateLimitService
 	httpUpstream              HTTPUpstream
 	antigravityGatewayService *AntigravityGatewayService
+	tlsFPProfileService       *TLSFingerprintProfileService
 	cfg                       *config.Config
 	responseHeaderFilter      *responseheaders.CompiledHeaderFilter
 }
@@ -108,6 +111,38 @@ func NewGeminiMessagesCompatService(
 // GetTokenProvider returns the token provider for OAuth accounts
 func (s *GeminiMessagesCompatService) GetTokenProvider() *GeminiTokenProvider {
 	return s.tokenProvider
+}
+
+// SetTLSFingerprintProfileService 挂载 TLS 指纹模板服务（可选，未显式注入时回退读取 antigravityGatewayService）。
+func (s *GeminiMessagesCompatService) SetTLSFingerprintProfileService(svc *TLSFingerprintProfileService) {
+	if s == nil {
+		return
+	}
+	s.tlsFPProfileService = svc
+}
+
+func (s *GeminiMessagesCompatService) resolveTLSProfile(account *Account) *tlsfingerprint.Profile {
+	if account == nil || !account.IsTLSFingerprintEnabled() {
+		return nil
+	}
+	var tlsSvc *TLSFingerprintProfileService
+	if s != nil {
+		tlsSvc = s.tlsFPProfileService
+		if tlsSvc == nil && s.antigravityGatewayService != nil {
+			tlsSvc = s.antigravityGatewayService.tlsFPProfileService
+		}
+	}
+	return resolveAntigravityAccountTLSProfile(tlsSvc, account)
+}
+
+func (s *GeminiMessagesCompatService) doUpstream(req *http.Request, proxyURL string, account *Account) (*http.Response, error) {
+	if account == nil {
+		return s.httpUpstream.Do(req, proxyURL, 0, 0)
+	}
+	if tlsProfile := s.resolveTLSProfile(account); tlsProfile != nil {
+		return s.httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, tlsProfile)
+	}
+	return s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 }
 
 func (s *GeminiMessagesCompatService) SelectAccountForModel(ctx context.Context, groupID *int64, sessionHash string, requestedModel string) (*Account, error) {
@@ -629,8 +664,9 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	startTime := time.Now()
 
 	var req struct {
-		Model  string `json:"model"`
-		Stream bool   `json:"stream"`
+		Model    string                      `json:"model"`
+		Stream   bool                        `json:"stream"`
+		Thinking *antigravity.ThinkingConfig `json:"thinking,omitempty"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return nil, fmt.Errorf("parse request: %w", err)
@@ -640,16 +676,13 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 	}
 
 	originalModel := req.Model
-	mappedModel := req.Model
-	if account.Type == AccountTypeAPIKey || account.Type == AccountTypeServiceAccount {
-		mappedModel = account.GetMappedModel(req.Model)
-	}
 
 	geminiReq, err := convertClaudeMessagesToGeminiGenerateContent(body)
 	if err != nil {
 		return nil, s.writeClaudeError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 	}
 	geminiReq = ensureGeminiFunctionCallThoughtSignatures(geminiReq)
+	mappedModel := compatGeminiModelForClaude(account, originalModel, req.Thinking)
 	originalClaudeBody := body
 
 	proxyURL, proxyErr := account.ProxyURLForOutbound()
@@ -695,6 +728,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 			}
 			upstreamReq.Header.Set("Content-Type", "application/json")
 			upstreamReq.Header.Set("x-goog-api-key", apiKey)
+			account.ApplyHeaderOverrides(upstreamReq.Header)
 			return upstreamReq, "x-request-id", nil
 		}
 		requestIDHeader = "x-request-id"
@@ -824,7 +858,7 @@ func (s *GeminiMessagesCompatService) Forward(ctx context.Context, c *gin.Contex
 		}
 		requestIDHeader = idHeader
 
-		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		resp, err = s.doUpstream(upstreamReq, proxyURL, account)
 		if err != nil {
 			return nil, s.handleUpstreamTransportError(ctx, c, account, err)
 		}
@@ -1196,6 +1230,59 @@ func (s *GeminiMessagesCompatService) forwardNativeTransportFailure(
 	return nil, transportErr
 }
 
+func nativeGeminiModel(account *Account, requested string, body []byte) string {
+	if account.Type != AccountTypeAPIKey && account.Type != AccountTypeUpstream && account.Type != AccountTypeServiceAccount {
+		return requested
+	}
+	if account.Platform == PlatformAntigravity {
+		if mapped, ok := resolveGeminiThinkingVariant(account, requested, body); ok {
+			return mapped
+		}
+	}
+	return account.GetMappedModel(requested)
+}
+
+func compatGeminiModelForClaude(account *Account, requested string, thinking *antigravity.ThinkingConfig) string {
+	if account.Type != AccountTypeAPIKey && account.Type != AccountTypeUpstream && account.Type != AccountTypeServiceAccount {
+		return requested
+	}
+	if account.Platform == PlatformAntigravity {
+		if mapped, ok := resolveGeminiThinkingVariantForLevel(account, requested, geminiThinkingLevelFromClaudeThinking(thinking)); ok {
+			return mapped
+		}
+	}
+	return account.GetMappedModel(requested)
+}
+
+func newGeminiAPIKeyRequest(ctx context.Context, account *Account, model, action string, stream bool, body []byte, validateBaseURL func(string) (string, error)) (*http.Request, error) {
+	apiKey := strings.TrimSpace(account.GetCredential("api_key"))
+	if apiKey == "" {
+		return nil, errors.New("gemini api_key not configured")
+	}
+	if account.Type == AccountTypeUpstream && strings.TrimSpace(account.GetCredential("base_url")) == "" {
+		return nil, errors.New("upstream base_url not configured")
+	}
+	baseURL, err := validateBaseURL(account.GetGeminiBaseURL(geminicli.AIStudioBaseURL))
+	if err != nil {
+		return nil, err
+	}
+	fullURL, err := buildGeminiAIStudioModelActionURL(baseURL, model, action, stream)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", apiKey)
+	if account.Type == AccountTypeUpstream {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+	account.ApplyHeaderOverrides(req.Header)
+	return req, nil
+}
+
 func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.Context, account *Account, originalModel string, action string, stream bool, body []byte) (*ForwardResult, error) {
 	beginUpstreamResponseModelObservation(c)
 	beginGeminiImageOutputObservation(c)
@@ -1227,10 +1314,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	// `thoughtSignature` to avoid frequent INVALID_ARGUMENT 400s.
 	body = ensureGeminiFunctionCallThoughtSignatures(body)
 
-	mappedModel := originalModel
-	if account.Type == AccountTypeAPIKey || account.Type == AccountTypeServiceAccount {
-		mappedModel = account.GetMappedModel(originalModel)
-	}
+	mappedModel := nativeGeminiModel(account, originalModel, body)
 
 	proxyURL, proxyErr := account.ProxyURLForOutbound()
 	if proxyErr != nil {
@@ -1250,31 +1334,10 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 	var buildReq func(ctx context.Context) (*http.Request, string, error)
 
 	switch account.Type {
-	case AccountTypeAPIKey:
+	case AccountTypeAPIKey, AccountTypeUpstream:
 		buildReq = func(ctx context.Context) (*http.Request, string, error) {
-			apiKey := account.GetCredential("api_key")
-			if strings.TrimSpace(apiKey) == "" {
-				return nil, "", errors.New("gemini api_key not configured")
-			}
-
-			baseURL := account.GetGeminiBaseURL(geminicli.AIStudioBaseURL)
-			normalizedBaseURL, err := s.validateUpstreamBaseURL(baseURL)
-			if err != nil {
-				return nil, "", err
-			}
-
-			fullURL, err := buildGeminiAIStudioModelActionURL(normalizedBaseURL, mappedModel, upstreamAction, useUpstreamStream)
-			if err != nil {
-				return nil, "", err
-			}
-
-			upstreamReq, err := http.NewRequestWithContext(ctx, http.MethodPost, fullURL, bytes.NewReader(body))
-			if err != nil {
-				return nil, "", err
-			}
-			upstreamReq.Header.Set("Content-Type", "application/json")
-			upstreamReq.Header.Set("x-goog-api-key", apiKey)
-			return upstreamReq, "x-request-id", nil
+			req, err := newGeminiAPIKeyRequest(ctx, account, mappedModel, upstreamAction, useUpstreamStream, body, s.validateUpstreamBaseURL)
+			return req, "x-request-id", err
 		}
 		requestIDHeader = "x-request-id"
 
@@ -1391,7 +1454,7 @@ func (s *GeminiMessagesCompatService) ForwardNative(ctx context.Context, c *gin.
 		}
 		requestIDHeader = idHeader
 
-		resp, err = s.httpUpstream.Do(upstreamReq, proxyURL, account.ID, account.Concurrency)
+		resp, err = s.doUpstream(upstreamReq, proxyURL, account)
 		if err != nil {
 			return s.forwardNativeTransportFailure(ctx, c, account, err, action, body, originalModel, mappedModel, startTime)
 		}
@@ -2910,12 +2973,19 @@ func (s *GeminiMessagesCompatService) ForwardAIStudioGET(ctx context.Context, ac
 	}
 
 	switch account.Type {
-	case AccountTypeAPIKey:
+	case AccountTypeAPIKey, AccountTypeUpstream:
 		apiKey := strings.TrimSpace(account.GetCredential("api_key"))
 		if apiKey == "" {
 			return nil, errors.New("gemini api_key not configured")
 		}
+		if account.Type == AccountTypeUpstream && strings.TrimSpace(account.GetCredential("base_url")) == "" {
+			return nil, errors.New("upstream base_url not configured")
+		}
 		req.Header.Set("x-goog-api-key", apiKey)
+		if account.Type == AccountTypeUpstream {
+			req.Header.Set("Authorization", "Bearer "+apiKey)
+		}
+		account.ApplyHeaderOverrides(req.Header)
 	case AccountTypeOAuth:
 		if s.tokenProvider == nil {
 			return nil, errors.New("gemini token provider not configured")
@@ -2929,7 +2999,7 @@ func (s *GeminiMessagesCompatService) ForwardAIStudioGET(ctx context.Context, ac
 		return nil, fmt.Errorf("unsupported account type: %s", account.Type)
 	}
 
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	resp, err := s.doUpstream(req, proxyURL, account)
 	if err != nil {
 		return nil, err
 	}
@@ -3051,36 +3121,7 @@ func isValidBase64(data string) bool {
 }
 
 func extractGeminiUsage(data []byte) *ClaudeUsage {
-	usage := gjson.GetBytes(data, "usageMetadata")
-	if !usage.Exists() {
-		return nil
-	}
-	prompt := int(usage.Get("promptTokenCount").Int())
-	cand := int(usage.Get("candidatesTokenCount").Int())
-	cached := int(usage.Get("cachedContentTokenCount").Int())
-	thoughts := int(usage.Get("thoughtsTokenCount").Int())
-
-	// 从 candidatesTokensDetails 提取 IMAGE 模态 token 数
-	imageTokens := 0
-	candidateDetails := usage.Get("candidatesTokensDetails")
-	if candidateDetails.Exists() {
-		candidateDetails.ForEach(func(_, detail gjson.Result) bool {
-			if detail.Get("modality").String() == "IMAGE" {
-				imageTokens = int(detail.Get("tokenCount").Int())
-				return false
-			}
-			return true
-		})
-	}
-
-	// 注意：Gemini 的 promptTokenCount 包含 cachedContentTokenCount，
-	// 但 Claude 的 input_tokens 不包含 cache_read_input_tokens，需要减去
-	return &ClaudeUsage{
-		InputTokens:          prompt - cached,
-		OutputTokens:         cand + thoughts,
-		CacheReadInputTokens: cached,
-		ImageOutputTokens:    imageTokens,
-	}
+	return extractGeminiUsageFromFrame(gjson.ParseBytes(data))
 }
 
 func asInt(v any) (int, bool) {

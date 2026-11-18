@@ -179,9 +179,14 @@ describe('isHeaderOverrideCapable', () => {
     expect(isHeaderOverrideCapable('grok', 'bedrock')).toBe(false)
   })
 
+  it('antigravity supports relay (apikey/upstream) accounts only', () => {
+    expect(isHeaderOverrideCapable('antigravity', 'apikey')).toBe(true)
+    expect(isHeaderOverrideCapable('antigravity', 'upstream')).toBe(true)
+    expect(isHeaderOverrideCapable('antigravity', 'oauth')).toBe(false)
+  })
+
   it('other platforms are not supported', () => {
     expect(isHeaderOverrideCapable('gemini', 'apikey')).toBe(false)
-    expect(isHeaderOverrideCapable('antigravity', 'apikey')).toBe(false)
     expect(isHeaderOverrideCapable('', 'apikey')).toBe(false)
   })
 })

@@ -1878,7 +1878,7 @@ func (s *adminServiceImpl) EnsureAntigravityPrivacy(ctx context.Context, account
 		return ""
 	}
 
-	mode := setAntigravityPrivacy(ctx, token, projectID, proxyURL)
+	mode := setAntigravityAccountPrivacy(ctx, account, token, projectID, proxyURL, s.tlsFPProfileService)
 	if mode == "" {
 		return ""
 	}
@@ -1911,7 +1911,7 @@ func (s *adminServiceImpl) ForceAntigravityPrivacy(ctx context.Context, account 
 		return ""
 	}
 
-	mode := setAntigravityPrivacy(ctx, token, projectID, proxyURL)
+	mode := setAntigravityAccountPrivacy(ctx, account, token, projectID, proxyURL, s.tlsFPProfileService)
 	if mode == "" {
 		return ""
 	}

@@ -18,6 +18,8 @@ import (
 	"github.com/Wei-Shaw/sub2api/internal/domain"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/antigravity"
 	"github.com/Wei-Shaw/sub2api/internal/pkg/logger"
+	"github.com/Wei-Shaw/sub2api/internal/pkg/tlsfingerprint"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 )
@@ -160,14 +162,15 @@ func (e *PromptTooLongError) Error() string {
 
 // AntigravityGatewayService 处理 Antigravity 平台的 API 转发
 type AntigravityGatewayService struct {
-	accountRepo       AccountRepository
-	tokenProvider     *AntigravityTokenProvider
-	rateLimitService  *RateLimitService
-	httpUpstream      HTTPUpstream
-	settingService    *SettingService
-	cache             GatewayCache // 用于模型级限流时清除粘性会话绑定
-	schedulerSnapshot *SchedulerSnapshotService
-	internal500Cache  Internal500CounterCache // INTERNAL 500 渐进惩罚计数器
+	accountRepo         AccountRepository
+	tokenProvider       *AntigravityTokenProvider
+	rateLimitService    *RateLimitService
+	httpUpstream        HTTPUpstream
+	settingService      *SettingService
+	cache               GatewayCache // 用于模型级限流时清除粘性会话绑定
+	schedulerSnapshot   *SchedulerSnapshotService
+	internal500Cache    Internal500CounterCache // INTERNAL 500 渐进惩罚计数器
+	tlsFPProfileService *TLSFingerprintProfileService
 }
 
 func (s *AntigravityGatewayService) upstreamErrorBodyReadLimit() int64 {
@@ -211,6 +214,32 @@ func NewAntigravityGatewayService(
 // GetTokenProvider 返回 token provider
 func (s *AntigravityGatewayService) GetTokenProvider() *AntigravityTokenProvider {
 	return s.tokenProvider
+}
+
+// SetTLSFingerprintProfileService 挂载 TLS 指纹模板服务（可选，与 OpenAIGatewayService 对齐）。
+func (s *AntigravityGatewayService) SetTLSFingerprintProfileService(svc *TLSFingerprintProfileService) {
+	if s == nil {
+		return
+	}
+	s.tlsFPProfileService = svc
+}
+
+func resolveAntigravityAccountTLSProfile(svc *TLSFingerprintProfileService, account *Account) *tlsfingerprint.Profile {
+	if account == nil || !account.IsTLSFingerprintEnabled() {
+		return nil
+	}
+	profile := svc.ResolveTLSProfile(account)
+	if account.IsAntigravityOAuthOrSetupToken() {
+		return tlsfingerprint.WithDefaultHTTP2ALPN(profile)
+	}
+	return profile
+}
+
+func (s *AntigravityGatewayService) resolveTLSProfile(account *Account) *tlsfingerprint.Profile {
+	if s == nil {
+		return resolveAntigravityAccountTLSProfile(nil, account)
+	}
+	return resolveAntigravityAccountTLSProfile(s.tlsFPProfileService, account)
 }
 
 // getLogConfig 获取上游错误日志配置
@@ -412,6 +441,7 @@ type TestConnectionResult struct {
 // 复用 antigravityRetryLoop 的完整重试 / credits overages / 智能重试逻辑，
 // 与真实调度行为一致。差异：不做账号切换（测试指定账号）、不记录 ops 错误。
 func (s *AntigravityGatewayService) TestConnection(ctx context.Context, account *Account, modelID string, prompt string) (*TestConnectionResult, error) {
+	ctx = withAntigravityDevice(ctx, account)
 
 	// 获取 token
 	if s.tokenProvider == nil {
@@ -599,6 +629,49 @@ func (s *AntigravityGatewayService) getClaudeTransformOptions(ctx context.Contex
 	return opts
 }
 
+func antigravityAccountSessionSeed(account *Account) string {
+	if account == nil {
+		return ""
+	}
+	if account.ID > 0 {
+		return "ag-acct-" + strconv.FormatInt(account.ID, 10)
+	}
+	if proj := strings.TrimSpace(account.GetCredential("project_id")); proj != "" {
+		return "ag-proj-" + proj
+	}
+	if email := strings.TrimSpace(account.GetCredential("email")); email != "" {
+		return "ag-email-" + email
+	}
+	return ""
+}
+
+func extractDownstreamSessionHint(c *gin.Context) string {
+	if c == nil || c.Request == nil {
+		return ""
+	}
+	for _, key := range []string{"session_id", "x-claude-code-session-id", "conversation_id", "x-session-id"} {
+		if v := strings.TrimSpace(c.GetHeader(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func (s *AntigravityGatewayService) getClaudeTransformOptionsForAccount(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+) antigravity.TransformOptions {
+	opts := s.getClaudeTransformOptions(ctx)
+	opts.SanitizeSessionID = true
+	opts.ClientSessionHint = extractDownstreamSessionHint(c)
+	if account != nil {
+		opts.AccountSessionSeed = antigravityAccountSessionSeed(account)
+		opts.MaskSessionID = account.IsSessionIDMaskingEnabled()
+	}
+	return opts
+}
+
 // antigravityTestMaxOutputTokens 测试连接的输出 token 上限：
 // 足够 thinking 模型完成思考并给出一句短回复，又不至于在长测试中消耗过多配额。
 const antigravityTestMaxOutputTokens = 512
@@ -692,6 +765,258 @@ func extractTestContentFromSSEResponse(respBody []byte) (string, []TestConnectio
 	return strings.Join(texts, ""), images
 }
 
+// injectIdentityPatchToGeminiMap 原地为 Gemini 请求 map 注入身份提示词（避免重复 Unmarshal/Marshal）。
+func injectIdentityPatchToGeminiMap(request map[string]any) {
+	if request == nil {
+		return
+	}
+	if sysInst, ok := request["systemInstruction"].(map[string]any); ok {
+		if parts, ok := sysInst["parts"].([]any); ok {
+			for _, part := range parts {
+				if partMap, ok := part.(map[string]any); ok {
+					if text, ok := partMap["text"].(string); ok && strings.Contains(text, "You are Antigravity") {
+						return
+					}
+				}
+			}
+		}
+	}
+
+	newPart := map[string]any{"text": antigravity.GetDefaultIdentityPatch()}
+	if existing, ok := request["systemInstruction"].(map[string]any); ok {
+		if parts, ok := existing["parts"].([]any); ok {
+			merged := make([]any, 0, len(parts)+1)
+			merged = append(merged, newPart)
+			merged = append(merged, parts...)
+			existing["parts"] = merged
+		} else {
+			existing["parts"] = []any{newPart}
+		}
+	} else {
+		request["systemInstruction"] = map[string]any{
+			"parts": []any{newPart},
+		}
+	}
+}
+
+// cleanGeminiRequestMap 原地清理 Gemini 请求 map 中的工具 Schema。
+func cleanGeminiRequestMap(payload map[string]any) bool {
+	if payload == nil {
+		return false
+	}
+	tools, ok := payload["tools"].([]any)
+	if !ok || len(tools) == 0 {
+		return false
+	}
+	modified := false
+	for _, t := range tools {
+		toolMap, ok := t.(map[string]any)
+		if !ok {
+			continue
+		}
+		var funcs []any
+		if f, ok := toolMap["functionDeclarations"].([]any); ok {
+			funcs = f
+		} else if f, ok := toolMap["function_declarations"].([]any); ok {
+			funcs = f
+		}
+		for _, f := range funcs {
+			funcMap, ok := f.(map[string]any)
+			if !ok {
+				continue
+			}
+			if params, ok := funcMap["parameters"].(map[string]any); ok {
+				antigravity.DeepCleanUndefined(params)
+				funcMap["parameters"] = antigravity.CleanJSONSchema(params)
+				modified = true
+			}
+		}
+	}
+	return modified
+}
+
+// enableMixedGeminiToolsInMap 原地消解内置搜索/代码执行工具与客户端 functionDeclarations 的混用冲突（#6464）。
+func enableMixedGeminiToolsInMap(request map[string]any) bool {
+	if request == nil {
+		return false
+	}
+	tools, ok := request["tools"].([]any)
+	if !ok || len(tools) == 0 {
+		return false
+	}
+	hasFunctionDeclarations := false
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			continue
+		}
+		if declarations, hasFunctions := tool["functionDeclarations"].([]any); hasFunctions && len(declarations) > 0 {
+			hasFunctionDeclarations = true
+			break
+		}
+	}
+	if !hasFunctionDeclarations {
+		return false
+	}
+
+	filtered := make([]any, 0, len(tools))
+	droppedBuiltin := false
+	for _, rawTool := range tools {
+		tool, ok := rawTool.(map[string]any)
+		if !ok {
+			filtered = append(filtered, rawTool)
+			continue
+		}
+		if _, hasSearch := tool["googleSearch"]; hasSearch {
+			delete(tool, "googleSearch")
+			droppedBuiltin = true
+		}
+		if _, hasCodeExecution := tool["codeExecution"]; hasCodeExecution {
+			delete(tool, "codeExecution")
+			droppedBuiltin = true
+		}
+		if len(tool) == 0 {
+			continue
+		}
+		filtered = append(filtered, tool)
+	}
+	if !droppedBuiltin {
+		return false
+	}
+	request["tools"] = filtered
+	if toolConfig, ok := request["toolConfig"].(map[string]any); ok {
+		delete(toolConfig, "includeServerSideToolInvocations")
+		delete(toolConfig, "include_server_side_tool_invocations")
+		if len(toolConfig) == 0 {
+			delete(request, "toolConfig")
+		}
+	}
+	return true
+}
+
+func ensureGeminiFunctionCallThoughtSignaturesInMap(payload map[string]any) {
+	if payload == nil {
+		return
+	}
+	contentsAny, ok := payload["contents"].([]any)
+	if !ok || len(contentsAny) == 0 {
+		return
+	}
+	for _, c := range contentsAny {
+		cm, ok := c.(map[string]any)
+		if !ok {
+			continue
+		}
+		partsAny, ok := cm["parts"].([]any)
+		if !ok || len(partsAny) == 0 {
+			continue
+		}
+		for _, p := range partsAny {
+			pm, ok := p.(map[string]any)
+			if !ok || pm == nil {
+				continue
+			}
+			if fc, ok := pm["functionCall"].(map[string]any); !ok || fc == nil {
+				continue
+			}
+			ts, _ := pm["thoughtSignature"].(string)
+			if strings.TrimSpace(ts) == "" {
+				pm["thoughtSignature"] = geminiDummyThoughtSignature
+			}
+		}
+	}
+}
+
+func extractFirstGeminiUserText(request map[string]any) string {
+	if request == nil {
+		return ""
+	}
+	contents, ok := request["contents"].([]any)
+	if !ok {
+		return ""
+	}
+	for _, rawContent := range contents {
+		cm, ok := rawContent.(map[string]any)
+		if !ok {
+			continue
+		}
+		role, _ := cm["role"].(string)
+		if role != "" && role != "user" {
+			continue
+		}
+		parts, ok := cm["parts"].([]any)
+		if !ok || len(parts) == 0 {
+			continue
+		}
+		if pm, ok := parts[0].(map[string]any); ok {
+			if text, _ := pm["text"].(string); text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+func ensureGeminiRequestSessionID(request map[string]any, account *Account, clientSessionHint string) {
+	if request == nil {
+		return
+	}
+	rawBodyHint, hasBodySessionID := request["sessionId"].(string)
+	rawHint := strings.TrimSpace(rawBodyHint)
+	if rawHint == "" {
+		rawHint = strings.TrimSpace(clientSessionHint)
+	}
+	mask := account != nil && account.IsSessionIDMaskingEnabled()
+	// Gemini 模型家族请求在未显式携带 sessionId、无下游会话线索（metadata.user_id / 会话头）且未开启会话伪装时，
+	// 保持不携带 sessionId 的上游契约；一旦存在异构会话线索或开启了 15 分钟伪装，则净化并派生官方格式会话 ID。
+	if (!hasBodySessionID || strings.TrimSpace(rawBodyHint) == "") && rawHint == "" && !mask {
+		return
+	}
+	seed := antigravityAccountSessionSeed(account)
+	request["sessionId"] = antigravity.DeriveAntigravitySessionID(
+		rawHint,
+		extractFirstGeminiUserText(request),
+		seed,
+		mask,
+		true,
+	)
+}
+
+// prepareGeminiRequestPayload 单遍解析并原地完成身份补丁注入、Schema 清洗、混合工具冲突调和与会话 ID 规范化。
+func prepareGeminiRequestPayload(body []byte, account *Account, clientSessionHint string, ensureFuncThoughtSig bool) (map[string]any, error) {
+	var request map[string]any
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, fmt.Errorf("解析 Gemini 请求失败: %w", err)
+	}
+	if request == nil {
+		request = make(map[string]any)
+	}
+	if ensureFuncThoughtSig {
+		ensureGeminiFunctionCallThoughtSignaturesInMap(request)
+	}
+	injectIdentityPatchToGeminiMap(request)
+	cleanGeminiRequestMap(request)
+	enableMixedGeminiToolsInMap(request)
+	ensureGeminiRequestSessionID(request, account, clientSessionHint)
+	return request, nil
+}
+
+func marshalWrappedV1InternalRequest(projectID, model string, request any) ([]byte, error) {
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return nil, errAntigravityProjectIDRequired
+	}
+	wrapped := map[string]any{
+		"project":     projectID,
+		"requestId":   "agent-" + uuid.NewString(),
+		"userAgent":   "antigravity", // 固定值，与官方客户端一致
+		"requestType": "agent",
+		"model":       model,
+		"request":     request,
+	}
+	return json.Marshal(wrapped)
+}
+
 // injectIdentityPatchToGeminiRequest 为 Gemini 格式请求注入身份提示词
 // 如果请求中已包含 "You are Antigravity" 则不重复注入
 func injectIdentityPatchToGeminiRequest(body []byte) ([]byte, error) {
@@ -699,43 +1024,18 @@ func injectIdentityPatchToGeminiRequest(body []byte) ([]byte, error) {
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, fmt.Errorf("解析 Gemini 请求失败: %w", err)
 	}
-
-	// 检查现有 systemInstruction 是否已包含身份提示词
 	if sysInst, ok := request["systemInstruction"].(map[string]any); ok {
 		if parts, ok := sysInst["parts"].([]any); ok {
 			for _, part := range parts {
 				if partMap, ok := part.(map[string]any); ok {
-					if text, ok := partMap["text"].(string); ok {
-						if strings.Contains(text, "You are Antigravity") {
-							// 已包含身份提示词，直接返回原始请求
-							return body, nil
-						}
+					if text, ok := partMap["text"].(string); ok && strings.Contains(text, "You are Antigravity") {
+						return body, nil
 					}
 				}
 			}
 		}
 	}
-
-	// 获取默认身份提示词
-	identityPatch := antigravity.GetDefaultIdentityPatch()
-
-	// 构建新的 systemInstruction
-	newPart := map[string]any{"text": identityPatch}
-
-	if existing, ok := request["systemInstruction"].(map[string]any); ok {
-		// 已有 systemInstruction，在开头插入身份提示词
-		if parts, ok := existing["parts"].([]any); ok {
-			existing["parts"] = append([]any{newPart}, parts...)
-		} else {
-			existing["parts"] = []any{newPart}
-		}
-	} else {
-		// 没有 systemInstruction，创建新的
-		request["systemInstruction"] = map[string]any{
-			"parts": []any{newPart},
-		}
-	}
-
+	injectIdentityPatchToGeminiMap(request)
 	return json.Marshal(request)
 }
 
@@ -745,21 +1045,7 @@ func (s *AntigravityGatewayService) wrapV1InternalRequest(projectID, model strin
 	if err := json.Unmarshal(originalBody, &request); err != nil {
 		return nil, fmt.Errorf("解析请求体失败: %w", err)
 	}
-	projectID = strings.TrimSpace(projectID)
-	if projectID == "" {
-		return nil, errAntigravityProjectIDRequired
-	}
-
-	wrapped := map[string]any{
-		"project":     projectID,
-		"requestId":   "agent-" + uuid.New().String(),
-		"userAgent":   "antigravity", // 固定值，与官方客户端一致
-		"requestType": "agent",
-		"model":       model,
-		"request":     request,
-	}
-
-	return json.Marshal(wrapped)
+	return marshalWrappedV1InternalRequest(projectID, model, request)
 }
 
 // unwrapV1InternalResponse 解包 v1internal 响应

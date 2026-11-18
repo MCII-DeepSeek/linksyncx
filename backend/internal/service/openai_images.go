@@ -245,6 +245,15 @@ func (s *OpenAIGatewayService) ParseOpenAIImagesRequest(c *gin.Context, body []b
 	return req, nil
 }
 
+func parseOpenAIImagesResponseFormat(value string) (string, error) {
+	switch format := strings.ToLower(strings.TrimSpace(value)); format {
+	case "url", "b64_json":
+		return format, nil
+	default:
+		return "", fmt.Errorf("response_format must be url or b64_json")
+	}
+}
+
 func parseOpenAIImagesJSONRequest(body []byte, req *OpenAIImagesRequest) error {
 	if modelResult := gjson.GetBytes(body, "model"); modelResult.Exists() {
 		req.Model = strings.TrimSpace(modelResult.String())
@@ -273,7 +282,13 @@ func parseOpenAIImagesJSONRequest(body []byte, req *OpenAIImagesRequest) error {
 		req.Size = strings.TrimSpace(sizeResult.String())
 		req.ExplicitSize = req.Size != ""
 	}
-	req.ResponseFormat = strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "response_format").String()))
+	if field := gjson.GetBytes(body, "response_format"); field.Exists() {
+		format, err := parseOpenAIImagesResponseFormat(field.String())
+		if err != nil {
+			return err
+		}
+		req.ResponseFormat = format
+	}
 	req.Quality = strings.TrimSpace(gjson.GetBytes(body, "quality").String())
 	req.Complexity = strings.TrimSpace(gjson.GetBytes(body, "complexity").String())
 	req.Background = strings.TrimSpace(gjson.GetBytes(body, "background").String())
@@ -401,7 +416,11 @@ func parseOpenAIImagesMultipartRequest(body []byte, contentType string, req *Ope
 			req.Size = value
 			req.ExplicitSize = value != ""
 		case "response_format":
-			req.ResponseFormat = strings.ToLower(value)
+			format, err := parseOpenAIImagesResponseFormat(value)
+			if err != nil {
+				return err
+			}
+			req.ResponseFormat = format
 		case "stream":
 			parsed, err := strconv.ParseBool(value)
 			if err != nil {
@@ -755,7 +774,11 @@ func (s *OpenAIGatewayService) forwardOpenAIImagesAPIKey(
 	imageCount := parsed.N
 	var firstTokenMs *int
 	if parsed.Stream && isEventStreamResponse(resp.Header) {
-		streamUsage, streamCount, streamSizes, ttft, err := s.handleOpenAIImagesStreamingResponse(resp, c, startTime, nil)
+		var urlFormat *string
+		if dataURLs {
+			urlFormat = &parsed.OutputFormat
+		}
+		streamUsage, streamCount, streamSizes, ttft, err := s.handleOpenAIImagesStreamingResponse(resp, c, startTime, nil, urlFormat)
 		if err != nil {
 			if streamCount > 0 {
 				return &OpenAIForwardResult{
@@ -1026,13 +1049,34 @@ func (s *OpenAIGatewayService) handleOpenAIImagesNonStreamingResponse(
 	return usage, extractOpenAIImageCountFromJSONBytes(body), collectOpenAIResponseImageOutputSizesFromJSONBytes(body), nil
 }
 
+// Streaming clients may consume partial b64_json while reading the final data URL.
+func openAIImagesStreamDataURL(data []byte, fallbackFormat string) []byte {
+	b64 := gjson.GetBytes(data, "b64_json").String()
+	if b64 == "" {
+		return data
+	}
+	format := gjson.GetBytes(data, "output_format").String()
+	if format == "" {
+		format = fallbackFormat
+	}
+	updated, err := sjson.SetBytes(data, "url", "data:"+openAIImageOutputMIMEType(format)+";base64,"+b64)
+	if err != nil {
+		return data
+	}
+	return updated
+}
+
 func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 	resp *http.Response,
 	c *gin.Context,
 	startTime time.Time,
 	direct *OpenAIImagesRequest,
+	apiKeyURLFormat *string,
 ) (OpenAIUsage, int, []string, *int, error) {
 	responseheaders.WriteFilteredHeaders(c.Writer.Header(), resp.Header, s.responseHeaderFilter)
+	if apiKeyURLFormat != nil {
+		c.Writer.Header().Del("Content-Length")
+	}
 	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
 	if contentType == "" {
 		contentType = "text/event-stream"
@@ -1113,16 +1157,7 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 			dataBytes, _ = sjson.SetBytes(dataBytes, "type", eventType)
 		}
 		if direct.ResponseFormat == "url" {
-			b64 := gjson.GetBytes(dataBytes, "b64_json").String()
-			format := gjson.GetBytes(dataBytes, "output_format").String()
-			if format == "" {
-				format = direct.OutputFormat
-			}
-			dataBytes = codexDirectImageURL(dataBytes, "", format)
-			// 既有流式契约在 url 模式同时保留 b64_json。
-			if b64 != "" {
-				dataBytes, _ = sjson.SetBytes(dataBytes, "b64_json", b64)
-			}
+			dataBytes = openAIImagesStreamDataURL(dataBytes, direct.OutputFormat)
 		}
 		if !clientDisconnected {
 			if err := s.writeOpenAIImagesStreamEvent(c, flusher, eventType, dataBytes); err != nil {
@@ -1133,7 +1168,44 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 		}
 	}
 
-	flushSSEEvent := func() {
+	writeRaw := func(line []byte) {
+		if clientDisconnected {
+			return
+		}
+		if _, err := c.Writer.Write(line); err != nil {
+			clientDisconnected = true
+			logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Images stream client disconnected, continue draining upstream for billing")
+			return
+		}
+		flusher.Flush()
+		lastDownstreamWriteAt = time.Now()
+	}
+
+	hasOpenDownstreamEvent := false
+	flushSSEEvent := func(appendTerminator bool) {
+		if apiKeyURLFormat != nil && len(sseData.lines) > 0 && !clientDisconnected {
+			// Preserve SSE ids, event names, comments and [DONE]. Only rewrite data fields.
+			lines := sseData.lines
+			if len(lines) > 1 {
+				if joined := strings.Join(lines, "\n"); gjson.Valid(joined) {
+					lines = []string{joined}
+				}
+			}
+			var frame bytes.Buffer
+			for _, line := range lines {
+				data := openAIImagesStreamDataURL([]byte(line), *apiKeyURLFormat)
+				frame.WriteString("data: ")
+				frame.Write(bytes.ReplaceAll(data, []byte("\n"), []byte("\ndata: ")))
+				frame.WriteByte('\n')
+			}
+			if appendTerminator {
+				frame.WriteByte('\n')
+			}
+			writeRaw(frame.Bytes())
+		}
+		if appendTerminator {
+			hasOpenDownstreamEvent = false
+		}
 		sseData.Flush(processSSEData)
 	}
 
@@ -1145,19 +1217,27 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 			ms := int(time.Since(startTime).Milliseconds())
 			firstTokenMs = &ms
 		}
-		if !clientDisconnected && direct == nil {
-			if _, writeErr := c.Writer.Write(line); writeErr != nil {
-				clientDisconnected = true
-				logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Images stream client disconnected, continue draining upstream for billing")
-			} else {
-				flusher.Flush()
-				lastDownstreamWriteAt = time.Now()
+		trimmedLine := strings.TrimRight(string(line), "\r\n")
+		_, isData := extractOpenAISSEDataLine(trimmedLine)
+		blank := strings.TrimSpace(trimmedLine) == ""
+		if blank {
+			flushSSEEvent(false)
+			hasOpenDownstreamEvent = false
+		}
+		if direct == nil && (apiKeyURLFormat == nil || !isData) {
+			writeRaw(line)
+			if !blank && !strings.HasPrefix(trimmedLine, ":") {
+				hasOpenDownstreamEvent = true
 			}
 		}
-
-		trimmedLine := strings.TrimRight(string(line), "\r\n")
-		if _, ok := extractOpenAISSEDataLine(trimmedLine); ok || strings.TrimSpace(trimmedLine) == "" {
+		if isData {
+			if direct == nil {
+				hasOpenDownstreamEvent = true
+			}
 			sseData.AddLine(trimmedLine, processSSEData)
+			return
+		}
+		if blank {
 			return
 		}
 		if !seenSSEData && !fallbackTooLarge {
@@ -1197,11 +1277,11 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 				break
 			}
 			if err != nil {
-				flushSSEEvent()
+				flushSSEEvent(false)
 				return usage, imageCounter.Count(), imageCounter.Sizes(), firstTokenMs, err
 			}
 		}
-		flushSSEEvent()
+		flushSSEEvent(true)
 		finalizeFallbackBody()
 		return usage, imageCounter.Count(), imageCounter.Sizes(), firstTokenMs, finish()
 	}
@@ -1268,12 +1348,12 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				flushSSEEvent()
+				flushSSEEvent(true)
 				finalizeFallbackBody()
 				return usage, imageCounter.Count(), imageCounter.Sizes(), firstTokenMs, finish()
 			}
 			if ev.err != nil {
-				flushSSEEvent()
+				flushSSEEvent(false)
 				return usage, imageCounter.Count(), imageCounter.Sizes(), firstTokenMs, ev.err
 			}
 			processLine(ev.line)
@@ -1292,7 +1372,13 @@ func (s *OpenAIGatewayService) handleOpenAIImagesStreamingResponse(
 			if clientDisconnected || time.Since(lastDownstreamWriteAt) < keepaliveInterval {
 				continue
 			}
-			if _, writeErr := io.WriteString(c.Writer, ":\n\n"); writeErr != nil {
+			// 若当前事件已写出 event:/id: 头或正在缓冲 data: 行，仅发单换行注释行（WHATWG SSE 规范忽略注释且不派发事件），
+			// 避免双换行提前截断并清空半开的 event: 头。
+			keepalivePayload := ":\n\n"
+			if hasOpenDownstreamEvent {
+				keepalivePayload = ":\n"
+			}
+			if _, writeErr := io.WriteString(c.Writer, keepalivePayload); writeErr != nil {
 				clientDisconnected = true
 				logger.LegacyPrintf("service.openai_gateway", "[OpenAI] Images stream client disconnected during keepalive, continue draining upstream for billing")
 				continue

@@ -1918,11 +1918,28 @@ func (s *OpenAIGatewayService) fetchOpenAIModelsUpstream(ctx context.Context, re
 			return nil, infraerrors.New(http.StatusInternalServerError, "OPENAI_CODEX_MODELS_UPSTREAM_NOT_CONFIGURED", "Codex models upstream HTTP client is not configured")
 		}
 		req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
-		resp, err = s.httpUpstream.Do(req, request.proxyURL, request.accountID, request.accountConcurrency)
+		if request.credentialAccount != nil && s.tlsFPProfileService != nil {
+			if profile := s.tlsFPProfileService.ResolveTLSProfile(request.credentialAccount); profile != nil {
+				resp, err = s.httpUpstream.DoWithTLS(req, request.proxyURL, request.accountID, request.accountConcurrency, profile)
+			} else {
+				resp, err = s.httpUpstream.Do(req, request.proxyURL, request.accountID, request.accountConcurrency)
+			}
+		} else {
+			resp, err = s.httpUpstream.Do(req, request.proxyURL, request.accountID, request.accountConcurrency)
+		}
 	} else {
 		handled := false
 		if s.pluginManager != nil {
 			resp, handled, err = s.pluginManager.RoundTripOpenAIOAuth(reqCtx, req, request.proxyURL, request.credentialAccount)
+		}
+		if !handled {
+			if s.httpUpstream != nil && request.credentialAccount != nil && s.tlsFPProfileService != nil {
+				if profile := s.tlsFPProfileService.ResolveTLSProfile(request.credentialAccount); profile != nil {
+					req = req.WithContext(WithHTTPUpstreamProfile(req.Context(), HTTPUpstreamProfileOpenAI))
+					resp, err = s.httpUpstream.DoWithTLS(req, request.proxyURL, request.accountID, request.accountConcurrency, profile)
+					handled = true
+				}
+			}
 		}
 		if !handled {
 			client, clientErr := httpclient.GetClient(httpclient.Options{

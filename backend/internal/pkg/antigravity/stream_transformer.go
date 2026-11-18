@@ -7,9 +7,16 @@ import (
 	"io"
 	"log"
 	"strings"
+	"sync"
 
 	"github.com/Wei-Shaw/sub2api/internal/pkg/apicompat"
 )
+
+var sseEventBufPool = sync.Pool{
+	New: func() any {
+		return bytes.NewBuffer(make([]byte, 0, 512))
+	},
+}
 
 // BlockType 内容块类型
 type BlockType int
@@ -466,7 +473,16 @@ func (p *StreamingProcessor) emitFinish(finishReason string) []apicompat.Anthrop
 
 // 字节接口保留空 text/thinking、null stop_sequence、图片用量和 hook 扩展字段。
 func (p *StreamingProcessor) formatEvents(events []apicompat.AnthropicStreamEvent) []byte {
-	var result bytes.Buffer
+	if len(events) == 0 {
+		return nil
+	}
+	buf := sseEventBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer func() {
+		if buf.Cap() <= 64<<10 {
+			sseEventBufPool.Put(buf)
+		}
+	}()
 	for _, event := range events {
 		data := map[string]any{"type": event.Type}
 		if event.Index != nil {
@@ -529,7 +545,13 @@ func (p *StreamingProcessor) formatEvents(events []apicompat.AnthropicStreamEven
 			}
 			return nil
 		}
-		_, _ = fmt.Fprintf(&result, "event: %s\ndata: %s\n\n", event.Type, jsonData)
+		buf.WriteString("event: ")
+		buf.WriteString(event.Type)
+		buf.WriteString("\ndata: ")
+		buf.Write(jsonData)
+		buf.WriteString("\n\n")
 	}
-	return result.Bytes()
+	out := make([]byte, buf.Len())
+	copy(out, buf.Bytes())
+	return out
 }

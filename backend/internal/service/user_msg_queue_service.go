@@ -65,7 +65,7 @@ func (s *UserMessageQueueService) ScopeFor(account *Account, parsed *ParsedReque
 	if s != nil && !s.cfg.SessionScoped() {
 		return scope
 	}
-	if account.IsSessionIDMaskingEnabled() {
+	if account.IsSingleSessionModeEnabled() {
 		return scope
 	}
 	session := umqClientSessionID(parsed, clientHeaders)

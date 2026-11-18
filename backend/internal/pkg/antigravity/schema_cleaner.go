@@ -26,17 +26,22 @@ func CleanJSONSchema(schema map[string]any) map[string]any {
 	return result
 }
 
-// extractDefs 提取并移除定义的 helper
+// extractDefs 提取并移除定义的 helper（无定义时返回 nil，避免每次清洗空分配 map）
 func extractDefs(schema map[string]any) map[string]any {
-	defs := make(map[string]any)
-	if d, ok := schema["$defs"].(map[string]any); ok {
-		for k, v := range d {
+	d1, ok1 := schema["$defs"].(map[string]any)
+	d2, ok2 := schema["definitions"].(map[string]any)
+	if !ok1 && !ok2 {
+		return nil
+	}
+	defs := make(map[string]any, len(d1)+len(d2))
+	if ok1 {
+		for k, v := range d1 {
 			defs[k] = v
 		}
 		delete(schema, "$defs")
 	}
-	if d, ok := schema["definitions"].(map[string]any); ok {
-		for k, v := range d {
+	if ok2 {
+		for k, v := range d2 {
 			defs[k] = v
 		}
 		delete(schema, "definitions")
@@ -276,18 +281,9 @@ func cleanJSONSchemaRecursive(value any) any {
 			delete(schemaMap, "const")
 		}
 
-		// 5. [CRITICAL] 白名单过滤
-		allowedFields := map[string]bool{
-			"type":        true,
-			"description": true,
-			"properties":  true,
-			"required":    true,
-			"items":       true,
-			"enum":        true,
-			"title":       true,
-		}
+		// 5. [CRITICAL] 白名单过滤（零堆分配内联判断，避免深层递归反复构建 map）
 		for k := range schemaMap {
-			if !allowedFields[k] {
+			if !isAllowedGeminiSchemaField(k) {
 				delete(schemaMap, k)
 			}
 		}
@@ -591,6 +587,15 @@ func scoreSchemaOption(val any) int {
 		return 1
 	}
 	return 0
+}
+
+func isAllowedGeminiSchemaField(k string) bool {
+	switch k {
+	case "type", "description", "properties", "required", "items", "enum", "title":
+		return true
+	default:
+		return false
+	}
 }
 
 // DeepCleanUndefined 深度清理值为 "[undefined]" 的字段

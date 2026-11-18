@@ -103,8 +103,9 @@ type TokenRefreshService struct {
 	runtimeBlocker   AccountRuntimeBlocker
 
 	// OpenAI privacy: 刷新成功后检查并设置 training opt-out
-	privacyClientFactory PrivacyClientFactory
-	proxyRepo            ProxyRepository
+	privacyClientFactory    PrivacyClientFactory
+	proxyRepo               ProxyRepository
+	antigravityOAuthService *AntigravityOAuthService
 
 	stopCh        chan struct{}
 	stopOnce      sync.Once
@@ -140,15 +141,16 @@ func NewTokenRefreshService(
 	}
 	runCtx, runCancel := context.WithCancel(context.Background())
 	s := &TokenRefreshService{
-		accountRepo:      accountRepo,
-		refreshPolicy:    DefaultBackgroundRefreshPolicy(),
-		cfg:              refreshCfg,
-		cacheInvalidator: cacheInvalidator,
-		schedulerCache:   schedulerCache,
-		tempUnschedCache: tempUnschedCache,
-		stopCh:           make(chan struct{}),
-		runCtx:           runCtx,
-		runCancel:        runCancel,
+		accountRepo:             accountRepo,
+		refreshPolicy:           DefaultBackgroundRefreshPolicy(),
+		cfg:                     refreshCfg,
+		cacheInvalidator:        cacheInvalidator,
+		schedulerCache:          schedulerCache,
+		tempUnschedCache:        tempUnschedCache,
+		antigravityOAuthService: antigravityOAuthService,
+		stopCh:                  make(chan struct{}),
+		runCtx:                  runCtx,
+		runCancel:               runCancel,
 	}
 	if pager, ok := accountRepo.(OAuthRefreshCandidatePager); ok {
 		s.candidatePager = pager
@@ -1568,7 +1570,11 @@ func (s *TokenRefreshService) ensureAntigravityPrivacy(ctx context.Context, acco
 		return
 	}
 
-	mode := setAntigravityPrivacy(ctx, token, projectID, proxyURL)
+	var tlsSvc *TLSFingerprintProfileService
+	if s.antigravityOAuthService != nil {
+		tlsSvc = s.antigravityOAuthService.tlsFPProfileService
+	}
+	mode := setAntigravityAccountPrivacy(ctx, account, token, projectID, proxyURL, tlsSvc)
 	if mode == "" {
 		return
 	}

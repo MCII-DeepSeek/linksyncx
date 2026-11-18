@@ -733,13 +733,21 @@ type adminServiceImpl struct {
 	// 分组平台变更后用来失效渠道缓存；可为 nil（缓存会在 TTL 到期后自然重建）
 	channelCacheInvalidator ChannelCacheInvalidator
 	// clashGuard 校验账号绑定 Clash 出口的独占约束；为 nil 时不校验。
-	clashGuard ClashExitGuard
+	clashGuard          ClashExitGuard
+	tlsFPProfileService *TLSFingerprintProfileService
 }
 
 // AttachClashExitGuard installs the Clash exit guard on the admin service.
 func AttachClashExitGuard(admin AdminService, guard ClashExitGuard) {
 	if impl, ok := admin.(*adminServiceImpl); ok && impl != nil {
 		impl.clashGuard = guard
+	}
+}
+
+// AttachTLSFingerprintProfileService installs the TLS fingerprint profile service on the admin service.
+func AttachTLSFingerprintProfileService(admin AdminService, svc *TLSFingerprintProfileService) {
+	if impl, ok := admin.(*adminServiceImpl); ok && impl != nil {
+		impl.tlsFPProfileService = svc
 	}
 }
 

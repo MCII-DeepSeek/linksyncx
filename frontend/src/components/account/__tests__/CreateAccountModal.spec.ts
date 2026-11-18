@@ -1316,4 +1316,19 @@ describe('CreateAccountModal device profile', () => {
     expect(wrapper.get('[data-testid="device-profile-mode-hint"]').text())
       .toBe('admin.accounts.deviceProfile.create.defaultHint')
   })
+
+  it('clears Antigravity TLS fingerprint and session masking state when switching platforms', async () => {
+    const wrapper = mountModal()
+    await selectButtonByText(wrapper, 'Antigravity')
+
+    await wrapper.get('[data-testid="create-antigravity-tls-fingerprint-toggle"]').trigger('click')
+    await wrapper.get('[data-testid="create-antigravity-session-masking-toggle"]').trigger('click')
+    expect(wrapper.find('[data-testid="create-antigravity-tls-profile-select"]').exists()).toBe(true)
+
+    await selectButtonByText(wrapper, 'Anthropic')
+    await selectButtonByText(wrapper, 'Antigravity')
+
+    expect(wrapper.find('[data-testid="create-antigravity-tls-profile-select"]').exists()).toBe(false)
+    expect(wrapper.get('[data-testid="create-antigravity-session-masking-toggle"]').classes()).toContain('bg-gray-200')
+  })
 })

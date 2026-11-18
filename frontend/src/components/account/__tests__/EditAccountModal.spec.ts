@@ -2010,3 +2010,58 @@ describe('EditAccountModal OpenAI 自动使用重置卡', () => {
     wrapper.unmount()
   })
 })
+
+describe('EditAccountModal Antigravity 指纹能力对齐', () => {
+  beforeEach(() => {
+    authIsSimpleMode.value = true
+    updateAccountMock.mockReset()
+    checkMixedChannelRiskMock.mockReset().mockResolvedValue({ has_risk: false })
+  })
+
+  it('Antigravity OAuth 账号支持回显与保存 TLS 指纹和会话 ID 伪装', async () => {
+    const account = {
+      ...buildAccount(),
+      platform: 'antigravity' as const,
+      type: 'oauth' as const,
+      enable_tls_fingerprint: true,
+      tls_fingerprint_profile_id: -1,
+      session_id_masking_enabled: true,
+      credentials: { project_id: 'proj-ag' },
+      extra: {
+        enable_tls_fingerprint: true,
+        tls_fingerprint_profile_id: -1,
+        session_id_masking_enabled: true
+      }
+    }
+    updateAccountMock.mockResolvedValue(account)
+    const wrapper = mountModal(account)
+
+    expect(wrapper.find('[data-testid="edit-antigravity-tls-fingerprint"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="edit-antigravity-session-masking"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="edit-antigravity-tls-profile-select"]').exists()).toBe(true)
+
+    await wrapper.get('form#edit-account-form').trigger('submit.prevent')
+    expect(updateAccountMock).toHaveBeenCalledTimes(1)
+    const extra = updateAccountMock.mock.calls[0]?.[1]?.extra
+    expect(extra).toMatchObject({
+      enable_tls_fingerprint: true,
+      tls_fingerprint_profile_id: -1,
+      session_id_masking_enabled: true
+    })
+    wrapper.unmount()
+  })
+
+  it('Antigravity Upstream 账号开放 TLS 指纹但隐藏 OAuth 专属会话伪装', () => {
+    const upstreamAccount = {
+      ...buildAccount(),
+      platform: 'antigravity' as const,
+      type: 'upstream' as const,
+      credentials: { base_url: 'https://relay.example.com', api_key: 'sk-relay' },
+      extra: {}
+    }
+    const wrapper = mountModal(upstreamAccount)
+    expect(wrapper.find('[data-testid="edit-antigravity-tls-fingerprint"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="edit-antigravity-session-masking"]').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})

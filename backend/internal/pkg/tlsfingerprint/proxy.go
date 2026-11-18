@@ -33,6 +33,12 @@ type DialOptions struct {
 	// SessionCache 为 TLS 会话票据缓存；nil 时每个 ProxyDialer 独占一个 LRU。
 	// 票据按 ServerName 复用，全局共享会让不同账号/出口的连接可被上游关联。
 	SessionCache utls.ClientSessionCache
+	// AllowHTTP2 允许目标在 ALPN 握手中协商出 "h2"，供挂载了 http2.Transport 的调用方使用；
+	// 默认 false（仅允许 http/1.1，防止纯 HTTP/1.1 Transport 在 h2 隧道上发出非法明文）。
+	AllowHTTP2 bool
+	// UseEnvironmentProxy 在未显式传入 proxyURL 时按目标地址查询 http.ProxyFromEnvironment
+	//（支持 HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY）；默认 false 以保持数据面严格按账号代理配置直连/走代理。
+	UseEnvironmentProxy bool
 }
 
 const (
@@ -88,31 +94,39 @@ func newProxyDialer(profile *Profile, proxyURL *url.URL, opts DialOptions, baseD
 	switch strings.ToLower(proxyURL.Scheme) {
 	case "http", "https":
 	case "socks5", "socks5h":
-		// x/net/proxy 的 SOCKS5 总是把域名交给代理解析（socks5h 语义），本机不做 DNS。
-		var auth *proxy.Auth
-		if proxyURL.User != nil {
-			password, _ := proxyURL.User.Password()
-			auth = &proxy.Auth{User: proxyURL.User.Username(), Password: password}
-		}
-		socksDialer, err := proxy.SOCKS5("tcp", proxyHostPort(proxyURL), auth, forwardDialer(baseDial))
+		socksDialer, err := buildSOCKS5ContextDialer(proxyURL, baseDial)
 		if err != nil {
-			return nil, fmt.Errorf("create SOCKS5 dialer: %w", err)
+			return nil, err
 		}
-		contextDialer, ok := socksDialer.(proxy.ContextDialer)
-		if !ok {
-			return nil, fmt.Errorf("SOCKS5 dialer does not support context")
-		}
-		d.socks = contextDialer
+		d.socks = socksDialer
 	default:
 		return nil, fmt.Errorf("unsupported proxy scheme %q", proxyURL.Scheme)
 	}
 	return d, nil
 }
 
+func buildSOCKS5ContextDialer(proxyURL *url.URL, baseDial func(ctx context.Context, network, addr string) (net.Conn, error)) (proxy.ContextDialer, error) {
+	// x/net/proxy 的 SOCKS5 总是把域名交给代理解析（socks5h 语义），本机不做 DNS。
+	var auth *proxy.Auth
+	if proxyURL.User != nil {
+		password, _ := proxyURL.User.Password()
+		auth = &proxy.Auth{User: proxyURL.User.Username(), Password: password}
+	}
+	socksDialer, err := proxy.SOCKS5("tcp", proxyHostPort(proxyURL), auth, forwardDialer(baseDial))
+	if err != nil {
+		return nil, fmt.Errorf("create SOCKS5 dialer: %w", err)
+	}
+	contextDialer, ok := socksDialer.(proxy.ContextDialer)
+	if !ok {
+		return nil, fmt.Errorf("SOCKS5 dialer does not support context")
+	}
+	return contextDialer, nil
+}
+
 // DialContext 经同一路由（直连或代理隧道）建立到 addr 的明文 TCP 连接。用作
 // http.Transport.DialContext：明文请求（如重定向到 http://）同样走代理，不会直连泄漏出口 IP。
 func (d *ProxyDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	return d.dialTunnel(ctx, network, addr)
+	return d.dialTunnelForScheme(ctx, network, addr, "http")
 }
 
 // DialTLSContext 经同一路由建立到 addr 的连接，并以 Profile 指纹完成 TLS 握手。
@@ -120,78 +134,108 @@ func (d *ProxyDialer) DialTLSContext(ctx context.Context, network, addr string) 
 	if err := ValidateProfile(d.profile); err != nil {
 		return nil, err
 	}
-	conn, err := d.dialTunnel(ctx, network, addr)
+	conn, err := d.dialTunnelForScheme(ctx, network, addr, "https")
 	if err != nil {
 		return nil, err
 	}
 	return d.handshake(ctx, conn, addr)
 }
 
-func (d *ProxyDialer) dialTunnel(ctx context.Context, network, addr string) (net.Conn, error) {
+func (d *ProxyDialer) dialTunnelForScheme(ctx context.Context, network, addr, targetScheme string) (net.Conn, error) {
 	switch {
 	case d.proxyURL == nil:
+		if d.opts.UseEnvironmentProxy {
+			envProxy, err := http.ProxyFromEnvironment(&http.Request{
+				URL: &url.URL{Scheme: targetScheme, Host: addr},
+			})
+			if err != nil {
+				return nil, fmt.Errorf("resolve environment proxy: %w", err)
+			}
+			if envProxy != nil {
+				return d.dialDynamicProxy(ctx, network, addr, envProxy)
+			}
+		}
 		return d.baseDial(ctx, network, addr)
 	case d.socks != nil:
-		slog.Debug("tls_fingerprint_socks5_connecting", "proxy", d.proxyURL.Host, "target", addr)
-		// SOCKS5 的建连与协商在同一次调用里完成；socks 实现会把 ctx 截止时间落到连接上。
-		sctx, cancel := context.WithTimeout(ctx, d.opts.DialTimeout+d.opts.HandshakeTimeout)
-		defer cancel()
-		conn, err := d.socks.DialContext(sctx, network, addr)
-		if err != nil {
-			return nil, fmt.Errorf("SOCKS5 connect via %s: %w", d.proxyURL.Host, err)
-		}
-		return conn, nil
+		return d.dialSOCKS5(ctx, network, addr, d.socks, d.proxyURL.Host)
 	default:
-		return d.dialHTTPConnect(ctx, network, addr)
+		return d.dialHTTPConnect(ctx, network, addr, d.proxyURL)
 	}
+}
+
+func (d *ProxyDialer) dialDynamicProxy(ctx context.Context, network, addr string, proxyURL *url.URL) (net.Conn, error) {
+	switch strings.ToLower(proxyURL.Scheme) {
+	case "http", "https":
+		return d.dialHTTPConnect(ctx, network, addr, proxyURL)
+	case "socks5", "socks5h":
+		socksDialer, err := buildSOCKS5ContextDialer(proxyURL, d.baseDial)
+		if err != nil {
+			return nil, err
+		}
+		return d.dialSOCKS5(ctx, network, addr, socksDialer, proxyURL.Host)
+	default:
+		return nil, fmt.Errorf("unsupported proxy scheme %q", proxyURL.Scheme)
+	}
+}
+
+func (d *ProxyDialer) dialSOCKS5(ctx context.Context, network, addr string, socksDialer proxy.ContextDialer, proxyHost string) (net.Conn, error) {
+	slog.Debug("tls_fingerprint_socks5_connecting", "proxy", proxyHost, "target", addr)
+	// SOCKS5 的建连与协商在同一次调用里完成；socks 实现会把 ctx 截止时间落到连接上。
+	sctx, cancel := context.WithTimeout(ctx, d.opts.DialTimeout+d.opts.HandshakeTimeout)
+	defer cancel()
+	conn, err := socksDialer.DialContext(sctx, network, addr)
+	if err != nil {
+		return nil, fmt.Errorf("SOCKS5 connect via %s: %w", proxyHost, err)
+	}
+	return conn, nil
 }
 
 // dialHTTPConnect 建立 HTTP(S) 代理隧道：TCP 连代理 →（https 代理）与代理 TLS
 // 握手 → CONNECT。
-func (d *ProxyDialer) dialHTTPConnect(ctx context.Context, network, addr string) (net.Conn, error) {
-	slog.Debug("tls_fingerprint_http_proxy_connecting", "proxy", d.proxyURL.Host, "target", addr)
-	conn, err := d.baseDial(ctx, network, proxyHostPort(d.proxyURL))
+func (d *ProxyDialer) dialHTTPConnect(ctx context.Context, network, addr string, proxyURL *url.URL) (net.Conn, error) {
+	slog.Debug("tls_fingerprint_http_proxy_connecting", "proxy", proxyURL.Host, "target", addr)
+	conn, err := d.baseDial(ctx, network, proxyHostPort(proxyURL))
 	if err != nil {
-		return nil, fmt.Errorf("connect to proxy %s: %w", d.proxyURL.Host, err)
+		return nil, fmt.Errorf("connect to proxy %s: %w", proxyURL.Host, err)
 	}
 
 	hctx, cancel := context.WithTimeout(ctx, d.opts.HandshakeTimeout)
 	defer cancel()
-	if strings.EqualFold(d.proxyURL.Scheme, "https") {
+	if strings.EqualFold(proxyURL.Scheme, "https") {
 		// 与代理之间是独立的一跳 TLS（标准库指纹只有代理可见），隧道内才是目标的 uTLS。
 		proxyTLS := tls.Client(conn, &tls.Config{
-			ServerName: d.proxyURL.Hostname(),
+			ServerName: proxyURL.Hostname(),
 			RootCAs:    d.opts.RootCAs,
 			NextProtos: []string{"http/1.1"},
 			MinVersion: tls.VersionTLS12,
 		})
 		if err := proxyTLS.HandshakeContext(hctx); err != nil {
 			_ = conn.Close()
-			return nil, fmt.Errorf("TLS handshake with proxy %s: %w", d.proxyURL.Host, err)
+			return nil, fmt.Errorf("TLS handshake with proxy %s: %w", proxyURL.Host, err)
 		}
 		conn = proxyTLS
 	}
 
-	tunnel, err := d.connect(hctx, conn, addr)
+	tunnel, err := d.connect(hctx, conn, addr, proxyURL)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
 	}
-	slog.Debug("tls_fingerprint_http_proxy_tunnel_established", "proxy", d.proxyURL.Host, "target", addr)
+	slog.Debug("tls_fingerprint_http_proxy_tunnel_established", "proxy", proxyURL.Host, "target", addr)
 	return tunnel, nil
 }
 
 // connect 在 conn 上发出 CONNECT 并读取代理响应。请求形态对齐 Bun 的代理隧道
 // （本机 claude.exe 2.1.283 二进制核实）：Host 与 Proxy-Connection: Keep-Alive，
 // 有凭据时带 Proxy-Authorization；不带 net/http 的默认 User-Agent。
-func (d *ProxyDialer) connect(ctx context.Context, conn net.Conn, addr string) (net.Conn, error) {
+func (d *ProxyDialer) connect(ctx context.Context, conn net.Conn, addr string, proxyURL *url.URL) (net.Conn, error) {
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(aLongTimeAgo) })
 
 	request := "CONNECT " + addr + " HTTP/1.1\r\nHost: " + addr + "\r\nProxy-Connection: Keep-Alive\r\n"
-	if user := d.proxyURL.User; user != nil {
+	if user := proxyURL.User; user != nil {
 		password, _ := user.Password()
 		request += "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte(user.Username()+":"+password)) + "\r\n"
 	}
@@ -208,13 +252,13 @@ func (d *ProxyDialer) connect(ctx context.Context, conn net.Conn, addr string) (
 	}
 	if !stop() {
 		// ctx 已结束，截止时间可能已被拨到过去，连接不可再用。
-		return nil, fmt.Errorf("proxy CONNECT via %s: %w", d.proxyURL.Host, context.Cause(ctx))
+		return nil, fmt.Errorf("proxy CONNECT via %s: %w", proxyURL.Host, context.Cause(ctx))
 	}
 	if err != nil {
-		return nil, fmt.Errorf("proxy CONNECT via %s: %w", d.proxyURL.Host, err)
+		return nil, fmt.Errorf("proxy CONNECT via %s: %w", proxyURL.Host, err)
 	}
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("proxy CONNECT via %s failed: %s", d.proxyURL.Host, resp.Status)
+		return nil, fmt.Errorf("proxy CONNECT via %s failed: %s", proxyURL.Host, resp.Status)
 	}
 	_ = conn.SetDeadline(time.Time{})
 	if br.Buffered() > 0 {
@@ -249,8 +293,8 @@ func (d *ProxyDialer) handshake(ctx context.Context, conn net.Conn, addr string)
 	}
 
 	state := tlsConn.ConnectionState()
-	// uTLS 连接不是 *tls.Conn，net/http 与 req 都只能在其上讲 HTTP/1.1。
-	if proto := state.NegotiatedProtocol; proto != "" && proto != "http/1.1" {
+	// 默认 uTLS 连接搭配纯 HTTP/1.1 Transport；仅在调用方显式挂载 HTTP/2 Transport（AllowHTTP2）时放行 h2。
+	if proto := state.NegotiatedProtocol; proto != "" && proto != "http/1.1" && (!d.opts.AllowHTTP2 || proto != "h2") {
 		_ = tlsConn.Close()
 		return nil, fmt.Errorf("TLS fingerprint: server negotiated ALPN %q, but the transport only speaks http/1.1; check the profile's ALPN list", proto)
 	}

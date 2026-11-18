@@ -245,7 +245,7 @@ func (s *AntigravityGatewayService) prepareAntigravityCompatCall(
 		_ = s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", err.Error())
 		return nil, err
 	}
-	geminiBody, err := s.buildAntigravityCompatGeminiBody(ctx, request.claudeBody, &claudeRequest, projectID, mappedModel)
+	geminiBody, err := s.buildAntigravityCompatGeminiBodyForAccount(ctx, c, account, request.claudeBody, &claudeRequest, projectID, mappedModel)
 	if err != nil {
 		return nil, s.writeAntigravityCompatError(c, http.StatusBadRequest, "invalid_request_error", "Invalid request")
 	}
@@ -272,27 +272,35 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 	projectID string,
 	mappedModel string,
 ) ([]byte, error) {
+	return s.buildAntigravityCompatGeminiBodyForAccount(ctx, nil, nil, claudeBody, claudeRequest, projectID, mappedModel)
+}
+
+func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBodyForAccount(
+	ctx context.Context,
+	c *gin.Context,
+	account *Account,
+	claudeBody []byte,
+	claudeRequest *antigravity.ClaudeRequest,
+	projectID string,
+	mappedModel string,
+) ([]byte, error) {
 	if strings.HasPrefix(strings.ToLower(mappedModel), "gemini-") {
 		body, err := convertClaudeMessagesToGeminiGenerateContent(claudeBody)
 		if err != nil {
 			return nil, err
 		}
-		body, err = enableMixedGeminiToolInvocations(body)
+		rawSessionHint := extractDownstreamSessionHint(c)
+		if claudeRequest != nil && claudeRequest.Metadata != nil && strings.TrimSpace(claudeRequest.Metadata.UserID) != "" {
+			rawSessionHint = claudeRequest.Metadata.UserID
+		}
+		reqMap, err := prepareGeminiRequestPayload(body, account, rawSessionHint, true)
 		if err != nil {
 			return nil, err
 		}
-		body = ensureGeminiFunctionCallThoughtSignatures(body)
-		body, err = injectIdentityPatchToGeminiRequest(body)
-		if err != nil {
-			return nil, err
-		}
-		if cleaned, cleanErr := cleanGeminiRequest(body); cleanErr == nil {
-			body = cleaned
-		}
-		return s.wrapV1InternalRequest(projectID, mappedModel, body)
+		return marshalWrappedV1InternalRequest(projectID, mappedModel, reqMap)
 	}
 
-	options := s.getClaudeTransformOptions(ctx)
+	options := s.getClaudeTransformOptionsForAccount(ctx, c, account)
 	options.EnableIdentityPatch = true
 	return antigravity.TransformClaudeToGeminiWithOptions(claudeRequest, projectID, mappedModel, options)
 }
@@ -304,64 +312,19 @@ func (s *AntigravityGatewayService) buildAntigravityCompatGeminiBody(
 // includeServerSideToolInvocations is set (issue #6464). Prefer client function
 // tools (Codex/agent workflows) and drop the incompatible built-ins.
 func enableMixedGeminiToolInvocations(body []byte) ([]byte, error) {
+	if !strings.Contains(string(body), `"tools"`) {
+		var probe any
+		if err := json.Unmarshal(body, &probe); err != nil {
+			return nil, err
+		}
+		return body, nil
+	}
 	var request map[string]any
 	if err := json.Unmarshal(body, &request); err != nil {
 		return nil, err
 	}
-
-	tools, ok := request["tools"].([]any)
-	if !ok || len(tools) == 0 {
+	if !enableMixedGeminiToolsInMap(request) {
 		return body, nil
-	}
-
-	hasFunctionDeclarations := false
-	for _, rawTool := range tools {
-		tool, ok := rawTool.(map[string]any)
-		if !ok {
-			continue
-		}
-		declarations, hasFunctions := tool["functionDeclarations"].([]any)
-		if hasFunctions && len(declarations) > 0 {
-			hasFunctionDeclarations = true
-			break
-		}
-	}
-	if !hasFunctionDeclarations {
-		return body, nil
-	}
-
-	filtered := make([]any, 0, len(tools))
-	droppedBuiltin := false
-	for _, rawTool := range tools {
-		tool, ok := rawTool.(map[string]any)
-		if !ok {
-			filtered = append(filtered, rawTool)
-			continue
-		}
-		if _, hasSearch := tool["googleSearch"]; hasSearch {
-			delete(tool, "googleSearch")
-			droppedBuiltin = true
-		}
-		if _, hasCodeExecution := tool["codeExecution"]; hasCodeExecution {
-			delete(tool, "codeExecution")
-			droppedBuiltin = true
-		}
-		if len(tool) == 0 {
-			continue
-		}
-		filtered = append(filtered, tool)
-	}
-	if !droppedBuiltin {
-		return body, nil
-	}
-
-	request["tools"] = filtered
-	if toolConfig, ok := request["toolConfig"].(map[string]any); ok {
-		delete(toolConfig, "includeServerSideToolInvocations")
-		delete(toolConfig, "include_server_side_tool_invocations")
-		if len(toolConfig) == 0 {
-			delete(request, "toolConfig")
-		}
 	}
 	return json.Marshal(request)
 }

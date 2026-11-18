@@ -123,27 +123,14 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 		return nil, antigravityProxyUnavailableFailover(c, account, proxyErr, geminiTransportFailoverBody)
 	}
 
-	// Antigravity 上游要求必须包含身份提示词，注入到请求中
-	injectedBody, err := injectIdentityPatchToGeminiRequest(body)
+	// 单遍解析并原地完成：身份提示词注入、Schema 清洗、内置/自定义工具冲突调和与账号级会话 ID 规范化
+	preparedReq, err := prepareGeminiRequestPayload(body, account, extractDownstreamSessionHint(c), false)
 	if err != nil {
 		return nil, s.writeGoogleError(c, http.StatusBadRequest, "Invalid request body")
 	}
 
-	// 清理 Schema
-	if cleanedBody, err := cleanGeminiRequest(injectedBody); err == nil {
-		injectedBody = cleanedBody
-		logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Cleaned request schema in forwarded request for account %s", account.Name)
-	} else {
-		logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Failed to clean schema: %v", err)
-	}
-
-	// Antigravity v1internal rejects built-in + functionDeclarations mixes (#6464).
-	if reconciled, err := enableMixedGeminiToolInvocations(injectedBody); err == nil {
-		injectedBody = reconciled
-	}
-
-	// 包装请求
-	wrappedBody, err := s.wrapV1InternalRequest(projectID, mappedModel, injectedBody)
+	// 单次序列化封装 v1internal 请求
+	wrappedBody, err := marshalWrappedV1InternalRequest(projectID, mappedModel, preparedReq)
 	if err != nil {
 		return nil, s.writeGoogleError(c, http.StatusInternalServerError, "Failed to build upstream request")
 	}
@@ -206,7 +193,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 			if fallbackModel != "" && fallbackModel != mappedModel {
 				logger.LegacyPrintf("service.antigravity_gateway", "[Antigravity] Model not found (%s), retrying with fallback model %s (account: %s)", mappedModel, fallbackModel, account.Name)
 
-				fallbackWrapped, err := s.wrapV1InternalRequest(projectID, fallbackModel, injectedBody)
+				fallbackWrapped, err := marshalWrappedV1InternalRequest(projectID, fallbackModel, preparedReq)
 				if err == nil {
 					if err := antigravityDownstreamError(ctx); err != nil {
 						return nil, err
@@ -214,7 +201,12 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 					fallbackCtx := WithHTTPUpstreamProfile(antigravityOutboundContext(ctx), HTTPUpstreamProfileLongStream)
 					fallbackReq, err := antigravity.NewAPIRequestWithURL(fallbackCtx, resolveAntigravityForwardBaseURL(account), upstreamAction, accessToken, fallbackWrapped)
 					if err == nil {
-						fallbackResp, err := s.httpUpstream.Do(fallbackReq, proxyURL, account.ID, account.Concurrency)
+						var fallbackResp *http.Response
+						if tlsProfile := s.resolveTLSProfile(account); tlsProfile != nil {
+							fallbackResp, err = s.httpUpstream.DoWithTLS(fallbackReq, proxyURL, account.ID, account.Concurrency, tlsProfile)
+						} else {
+							fallbackResp, err = s.httpUpstream.Do(fallbackReq, proxyURL, account.ID, account.Concurrency)
+						}
 						if err == nil && fallbackResp != nil && fallbackResp.StatusCode < 400 {
 							_ = resp.Body.Close()
 							resp = fallbackResp
@@ -237,7 +229,7 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 			s.settingService != nil &&
 			s.settingService.IsSignatureRectifierEnabled(ctx) &&
 			isSignatureRelatedError(signatureCheckBody) &&
-			bytes.Contains(injectedBody, []byte(`"thoughtSignature"`)) {
+			bytes.Contains(body, []byte(`"thoughtSignature"`)) {
 			upstreamMsg := sanitizeUpstreamErrorMessage(strings.TrimSpace(extractAntigravityErrorMessage(signatureCheckBody)))
 			upstreamDetail := s.getUpstreamErrorDetail(signatureCheckBody)
 			appendOpsUpstreamError(c, OpsUpstreamErrorEvent{
@@ -255,8 +247,8 @@ func (s *AntigravityGatewayService) ForwardGemini(ctx context.Context, c *gin.Co
 
 			logger.LegacyPrintf("service.antigravity_gateway", "Antigravity Gemini account %d: detected signature-related 400, retrying with cleaned thought signatures", account.ID)
 
-			cleanedInjectedBody := CleanGeminiNativeThoughtSignatures(injectedBody)
-			retryWrappedBody, wrapErr := s.wrapV1InternalRequest(projectID, mappedModel, cleanedInjectedBody)
+			cleanedReqMap, _ := replaceThoughtSignaturesRecursive(preparedReq).(map[string]any)
+			retryWrappedBody, wrapErr := marshalWrappedV1InternalRequest(projectID, mappedModel, cleanedReqMap)
 			if wrapErr == nil {
 				retryResult, retryErr := s.antigravityRetryLoop(antigravityRetryLoopParams{
 					ctx:             ctx,
@@ -432,7 +424,7 @@ handleSuccess:
 		logger.LegacyPrintf("service.antigravity_gateway", "%s status=stream_error error=%v", prefix, streamErr)
 		partial := partialAntigravityUsageResult(c, resp, streamRes, originalModel, forwardedModel, stream, startTime, streamErr)
 		if partial != nil {
-			partial.ReasoningEffort = extractGeminiReasoningEffortFromBody(injectedBody)
+			partial.ReasoningEffort = extractGeminiReasoningEffortFromBody(body)
 			partial.ImageSize, partial.ImageInputSize = imageSize, imageInputSize
 		}
 		return partial, streamErr
@@ -460,7 +452,7 @@ handleSuccess:
 		UpstreamResponseModel:         observedUpstreamResponseModel(c),
 		UpstreamResponseModelConflict: observedUpstreamResponseModelConflict(c),
 		Stream:                        stream,
-		ReasoningEffort:               extractGeminiReasoningEffortFromBody(injectedBody),
+		ReasoningEffort:               extractGeminiReasoningEffortFromBody(body),
 		Duration:                      time.Since(startTime),
 		FirstTokenMs:                  firstTokenMs,
 		ClientDisconnect:              clientDisconnect,
@@ -472,53 +464,20 @@ handleSuccess:
 
 // cleanGeminiRequest 清理 Gemini 请求体中的 Schema
 func cleanGeminiRequest(body []byte) ([]byte, error) {
+	if !bytes.Contains(body, []byte(`"tools"`)) {
+		var probe any
+		if err := json.Unmarshal(body, &probe); err != nil {
+			return nil, err
+		}
+		return body, nil
+	}
 	var payload map[string]any
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, err
 	}
-
-	modified := false
-
-	// 1. 清理 Tools
-	if tools, ok := payload["tools"].([]any); ok && len(tools) > 0 {
-		for _, t := range tools {
-			toolMap, ok := t.(map[string]any)
-			if !ok {
-				continue
-			}
-
-			// function_declarations (snake_case) or functionDeclarations (camelCase)
-			var funcs []any
-			if f, ok := toolMap["functionDeclarations"].([]any); ok {
-				funcs = f
-			} else if f, ok := toolMap["function_declarations"].([]any); ok {
-				funcs = f
-			}
-
-			if len(funcs) == 0 {
-				continue
-			}
-
-			for _, f := range funcs {
-				funcMap, ok := f.(map[string]any)
-				if !ok {
-					continue
-				}
-
-				if params, ok := funcMap["parameters"].(map[string]any); ok {
-					antigravity.DeepCleanUndefined(params)
-					cleaned := antigravity.CleanJSONSchema(params)
-					funcMap["parameters"] = cleaned
-					modified = true
-				}
-			}
-		}
-	}
-
-	if !modified {
+	if !cleanGeminiRequestMap(payload) {
 		return body, nil
 	}
-
 	return json.Marshal(payload)
 }
 

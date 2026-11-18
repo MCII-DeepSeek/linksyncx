@@ -292,6 +292,8 @@ func (c *schedulerCache) GetSnapshot(ctx context.Context, bucket service.Schedul
 	}
 
 	accounts := make([]*service.Account, 0, len(values))
+	var legacyKeys []string
+	var legacyIndexes []int
 	for i, val := range values {
 		if val == nil {
 			return nil, false, nil
@@ -304,6 +306,33 @@ func (c *schedulerCache) GetSnapshot(ctx context.Context, bucket service.Schedul
 			return nil, false, err
 		}
 		accounts = append(accounts, account)
+		if _, current := account.Extra[service.AntigravityModelCatalogExtraKey]; account.Platform == service.PlatformAntigravity && !current {
+			legacyKeys = append(legacyKeys, schedulerAccountKey(ids[i]))
+			legacyIndexes = append(legacyIndexes, i)
+		}
+	}
+	// During a rolling upgrade, older writers still publish the previous metadata
+	// shape. Recover from the full Redis records until those snapshots are rebuilt.
+	if len(legacyKeys) > 0 {
+		fullRecords, err := c.mgetChunked(ctx, legacyKeys)
+		if err != nil {
+			return nil, false, err
+		}
+		for j, record := range fullRecords {
+			if record == nil {
+				return nil, false, nil
+			}
+			full, err := decodeCachedAccount(record)
+			if err != nil {
+				return nil, false, err
+			}
+			i := legacyIndexes[j]
+			projected := buildSchedulerMetadataAccount(*full)
+			if err := applySchedulerLastUsed(&projected, lastUsedValues[i]); err != nil {
+				return nil, false, err
+			}
+			accounts[i] = &projected
+		}
 	}
 
 	return accounts, true, nil
@@ -863,6 +892,14 @@ func (c *schedulerCache) mgetChunked(ctx context.Context, keys []string) ([]any,
 }
 
 func buildSchedulerMetadataAccount(account service.Account) service.Account {
+	extra := filterSchedulerExtra(account.Extra)
+	if account.Platform == service.PlatformAntigravity {
+		if extra == nil {
+			extra = make(map[string]any)
+		}
+		// A present null also marks a current projection for an unsynced account.
+		extra[service.AntigravityModelCatalogExtraKey] = schedulerAntigravityCatalog(&account)
+	}
 	return service.Account{
 		ID:                      account.ID,
 		Name:                    account.Name,
@@ -890,7 +927,7 @@ func buildSchedulerMetadataAccount(account service.Account) service.Account {
 		AccountGroups:           filterSchedulerAccountGroups(account.AccountGroups),
 		GroupIDs:                filterSchedulerGroupIDs(account.GroupIDs, account.AccountGroups),
 		Credentials:             filterSchedulerCredentials(account.Credentials),
-		Extra:                   filterSchedulerExtra(account.Extra),
+		Extra:                   extra,
 	}
 }
 
@@ -950,13 +987,36 @@ func filterSchedulerGroupIDs(groupIDs []int64, accountGroups []service.AccountGr
 	return filtered
 }
 
+// Candidate selection needs model IDs and deprecation aliases, not the descriptive metadata.
+func schedulerAntigravityCatalog(account *service.Account) *service.AntigravityModelCatalogSnapshot {
+	catalog := account.GetAntigravityModelCatalogSnapshot()
+	metadata := account.GetUpstreamModelMetadataSnapshot()
+	if catalog == nil && metadata == nil {
+		return nil
+	}
+	result := &service.AntigravityModelCatalogSnapshot{Models: make(map[string]service.AntigravityCatalogModel)}
+	if catalog != nil {
+		result.SyncedAt = catalog.SyncedAt
+		result.DeprecatedModelIDs = catalog.DeprecatedModelIDs
+		for id := range catalog.Models {
+			result.Models[id] = service.AntigravityCatalogModel{ID: id}
+		}
+	}
+	if metadata != nil {
+		for id := range metadata.Models {
+			result.Models[id] = service.AntigravityCatalogModel{ID: id}
+		}
+	}
+	return result
+}
+
 func filterSchedulerCredentials(credentials map[string]any) map[string]any {
 	if len(credentials) == 0 {
 		return nil
 	}
 	// Candidate-list admission evaluates the account override before hydrating
 	// the full account. Dropping it silently falls back to the platform threshold.
-	keys := []string{"model_mapping", "compact_model_mapping", "api_key", "project_id", "oauth_type", "plan_type", "account_scheduling_threshold"}
+	keys := []string{"model_mapping", service.AntigravityModelRestrictionModeKey, "compact_model_mapping", "api_key", "project_id", "oauth_type", "plan_type", "account_scheduling_threshold"}
 	filtered := make(map[string]any)
 	for _, key := range keys {
 		if value, ok := credentials[key]; ok && value != nil {

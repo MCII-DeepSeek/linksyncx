@@ -38,7 +38,7 @@ func (s *OpenAIGatewayService) DetectOpenAIRequestTimezone(ctx context.Context, 
 		return result, err
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	resp, err := s.doOpenAIHTTPWithTLS(req, proxyURL, account)
 	if err != nil {
 		result.Error = fmt.Sprintf("exit ip lookup failed: %v", err)
 		_ = s.persistOpenAIRequestTimezone(ctx, account, result)

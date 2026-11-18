@@ -53,6 +53,9 @@ export function isHeaderOverrideCapable(platform: string, type: string): boolean
   ) {
     return type === 'apikey'
   }
+  if (platform === 'antigravity') {
+    return type === 'apikey' || type === 'upstream'
+  }
   if (platform === 'grok') {
     return type === 'apikey' || type === 'oauth'
   }

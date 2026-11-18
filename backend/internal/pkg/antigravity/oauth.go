@@ -179,6 +179,16 @@ func DevicePlatformFromContext(ctx context.Context) string {
 	return id.platform
 }
 
+// EffectiveDevicePlatformForContext 返回与当前请求 User-Agent / Client-Metadata 严格自洽的平台枚举。
+// 钉住设备时返回该设备的官方枚举（如 DARWIN_ARM64 / LINUX_AMD64）；未钉设备时返回 WINDOWS_AMD64，
+// 与默认 UA（windows/amd64）及 Client-Metadata（WINDOWS）保持三端同源一致。
+func EffectiveDevicePlatformForContext(ctx context.Context) string {
+	if platform := DevicePlatformFromContext(ctx); platform != "" {
+		return platform
+	}
+	return "WINDOWS_AMD64"
+}
+
 // GoogleCloudSDKAPIClient 是官方 Antigravity 客户端在 v1internal 请求中携带的
 // X-Goog-Api-Client 值。
 const GoogleCloudSDKAPIClient = "google-cloud-sdk vscode_cloudshelleditor/0.1"

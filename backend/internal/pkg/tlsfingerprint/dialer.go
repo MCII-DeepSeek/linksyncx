@@ -7,6 +7,7 @@ import (
 	"context"
 	"net"
 	"net/url"
+	"strings"
 
 	utls "github.com/refraction-networking/utls"
 )
@@ -25,6 +26,72 @@ type Profile struct {
 	KeyShareGroups      []uint16 // Empty uses [X25519MLKEM768, X25519]
 	PSKModes            []uint16 // Empty uses [psk_dhe_ke]
 	Extensions          []uint16 // Extension type IDs in order; empty uses default Claude Code 2.1.280 (Bun) order
+}
+
+// ProfileSupportsHTTP2 判断模板最终生效的 ClientHello 是否声明了 h2 ALPN。
+func ProfileSupportsHTTP2(profile *Profile) bool {
+	if profile == nil || len(profile.ALPNProtocols) == 0 {
+		return false
+	}
+	if !profileSendsALPNExtension(profile) {
+		return false
+	}
+	for _, proto := range profile.ALPNProtocols {
+		if strings.EqualFold(strings.TrimSpace(proto), "h2") {
+			return true
+		}
+	}
+	return false
+}
+
+// WithDefaultHTTP2ALPN 在模板未显式指定 ALPNProtocols 且包含 ALPN 扩展时，
+// 返回补齐了 ["h2", "http/1.1"] 的浅拷贝，使原生走 HTTP/2 的平台（如 Antigravity OAuth）
+// 启用 TLS 指纹伪装时保持 HTTP/2 协商而非退化为 HTTP/1.1。
+// 若管理员已在模板中显式配置 ALPNProtocols（如仅 ["http/1.1"]），则原样尊重不覆盖。
+func WithDefaultHTTP2ALPN(profile *Profile) *Profile {
+	if profile == nil || len(profile.ALPNProtocols) > 0 || !profileSendsALPNExtension(profile) {
+		return profile
+	}
+	clone := *profile
+	clone.ALPNProtocols = []string{"h2", "http/1.1"}
+	return &clone
+}
+
+// WithoutHTTP2ALPN 返回剔除了 h2 ALPN 的模板浅拷贝，供对端不支持 HTTP/2 时的 HTTP/1.1 回退使用。
+func WithoutHTTP2ALPN(profile *Profile) *Profile {
+	if profile == nil || len(profile.ALPNProtocols) == 0 {
+		return profile
+	}
+	filtered := make([]string, 0, len(profile.ALPNProtocols))
+	changed := false
+	for _, proto := range profile.ALPNProtocols {
+		if strings.EqualFold(strings.TrimSpace(proto), "h2") {
+			changed = true
+			continue
+		}
+		filtered = append(filtered, proto)
+	}
+	if !changed {
+		return profile
+	}
+	if len(filtered) == 0 {
+		filtered = []string{"http/1.1"}
+	}
+	clone := *profile
+	clone.ALPNProtocols = filtered
+	return &clone
+}
+
+func profileSendsALPNExtension(profile *Profile) bool {
+	if profile == nil || len(profile.Extensions) == 0 {
+		return true // defaultExtensionOrder 包含 alpn (16)
+	}
+	for _, ext := range profile.Extensions {
+		if ext == 16 {
+			return true
+		}
+	}
+	return false
 }
 
 // Dialer creates TLS connections with custom fingerprints.

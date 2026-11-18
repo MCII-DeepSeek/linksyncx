@@ -1480,6 +1480,85 @@
         <DeviceProfileEditor v-model="deviceProfile" platform="antigravity" />
       </div>
 
+      <!-- Antigravity TLS Fingerprint & Session Masking -->
+      <div
+        v-if="account.platform === 'antigravity'"
+        class="border-t border-gray-200 pt-4 dark:border-dark-600 space-y-4"
+        data-testid="edit-antigravity-fingerprint-controls"
+      >
+        <div
+          class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
+          data-testid="edit-antigravity-tls-fingerprint"
+        >
+          <div class="flex items-center justify-between">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.tlsFingerprint.label') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{
+                  account.type === 'oauth'
+                    ? t('admin.accounts.quotaControl.tlsFingerprint.antigravityOAuthHint')
+                    : t('admin.accounts.quotaControl.tlsFingerprint.antigravityRelayHint')
+                }}
+              </p>
+            </div>
+            <button
+              type="button"
+              data-testid="edit-antigravity-tls-fingerprint-toggle"
+              @click="tlsFingerprintEnabled = !tlsFingerprintEnabled"
+              :class="[
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+                tlsFingerprintEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+              ]"
+            >
+              <span
+                :class="[
+                  'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                  tlsFingerprintEnabled ? 'translate-x-5' : 'translate-x-0'
+                ]"
+              />
+            </button>
+          </div>
+          <div v-if="tlsFingerprintEnabled" class="mt-3">
+            <select v-model="tlsFingerprintProfileId" class="input" data-testid="edit-antigravity-tls-profile-select">
+              <option :value="null">{{ t('admin.accounts.quotaControl.tlsFingerprint.defaultProfile') }}</option>
+              <option v-if="tlsFingerprintProfiles.length > 0" :value="-1">{{ t('admin.accounts.quotaControl.tlsFingerprint.randomProfile') }}</option>
+              <option v-for="p in tlsFingerprintProfiles" :key="p.id" :value="p.id">{{ p.name }}</option>
+            </select>
+          </div>
+        </div>
+
+        <div
+          v-if="account.type === 'oauth'"
+          class="rounded-lg border border-gray-200 p-4 dark:border-dark-600"
+          data-testid="edit-antigravity-session-masking"
+        >
+          <div class="flex items-center justify-between">
+            <div>
+              <label class="input-label mb-0">{{ t('admin.accounts.quotaControl.sessionIdMasking.label') }}</label>
+              <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                {{ t('admin.accounts.quotaControl.sessionIdMasking.antigravityHint') }}
+              </p>
+            </div>
+            <button
+              type="button"
+              data-testid="edit-antigravity-session-masking-toggle"
+              @click="sessionIdMaskingEnabled = !sessionIdMaskingEnabled"
+              :class="[
+                'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-primary-500 focus:ring-offset-2',
+                sessionIdMaskingEnabled ? 'bg-primary-600' : 'bg-gray-200 dark:bg-dark-600'
+              ]"
+            >
+              <span
+                :class="[
+                  'pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out',
+                  sessionIdMaskingEnabled ? 'translate-x-5' : 'translate-x-0'
+                ]"
+              />
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- Antigravity model restriction (applies to all antigravity types) -->
       <div v-if="account.platform === 'antigravity'" class="border-t border-gray-200 pt-4 dark:border-dark-600">
         <label class="input-label">{{ t('admin.accounts.modelRestriction') }}</label>
@@ -3478,6 +3557,7 @@ import {
 import {
   getPresetMappingsByPlatform,
   commonErrorCodes,
+  buildAntigravityModelRestriction,
   buildModelMappingObject,
   splitModelMappingObject,
   isValidWildcardPattern
@@ -4736,36 +4816,22 @@ const syncFormFromAccount = (newAccount: Account | null) => {
     resetQuotaNotify()
   }
 
-  // Load antigravity model mapping (Antigravity 只支持映射模式)
+  antigravityModelRestrictionMode.value = 'mapping'
+  antigravityWhitelistModels.value = []
+  antigravityModelMappings.value = []
   if (newAccount.platform === 'antigravity') {
-    const credentials = newAccount.credentials as Record<string, unknown> | undefined
-
-    // Antigravity 始终使用映射模式
-    antigravityModelRestrictionMode.value = 'mapping'
-    antigravityWhitelistModels.value = []
-
-    // 从 model_mapping 读取映射配置
-    const rawAgMapping = credentials?.model_mapping as Record<string, string> | undefined
-    if (rawAgMapping && typeof rawAgMapping === 'object') {
-      const entries = Object.entries(rawAgMapping)
-      // 无论是白名单样式(key===value)还是真正的映射，都统一转换为映射列表
-      antigravityModelMappings.value = entries.map(([from, to]) => ({ from, to }))
-    } else {
-      // 兼容旧数据：从 model_whitelist 读取，转换为映射格式
-      const rawWhitelist = credentials?.model_whitelist
-      if (Array.isArray(rawWhitelist) && rawWhitelist.length > 0) {
-        antigravityModelMappings.value = rawWhitelist
-          .map((v) => String(v).trim())
-          .filter((v) => v.length > 0)
-          .map((m) => ({ from: m, to: m }))
-      } else {
-        antigravityModelMappings.value = []
-      }
+    const mapping = credentials?.model_mapping as Record<string, string> | undefined
+    if (credentials?.model_restriction_mode === 'whitelist') {
+      antigravityModelRestrictionMode.value = 'whitelist'
+      antigravityWhitelistModels.value = Object.keys(mapping || {})
+    } else if (mapping && typeof mapping === 'object') {
+      antigravityModelMappings.value = Object.entries(mapping).map(([from, to]) => ({ from, to }))
+    } else if (Array.isArray(credentials?.model_whitelist)) {
+      antigravityModelMappings.value = credentials.model_whitelist
+        .map((m) => String(m).trim())
+        .filter(Boolean)
+        .map((m) => ({ from: m, to: m }))
     }
-  } else {
-    antigravityModelRestrictionMode.value = 'mapping'
-    antigravityWhitelistModels.value = []
-    antigravityModelMappings.value = []
   }
 
   // Load quota control settings (Anthropic OAuth/SetupToken only)
@@ -5357,9 +5423,9 @@ function loadQuotaControlSettings(account: Account) {
   rpmStrategy.value = 'tiered'
   rpmStickyBuffer.value = null
   userMsgQueueMode.value = ''
-  tlsFingerprintEnabled.value = false
-  tlsFingerprintProfileId.value = null
-  sessionIdMaskingEnabled.value = false
+  tlsFingerprintEnabled.value = account.enable_tls_fingerprint === true
+  tlsFingerprintProfileId.value = account.tls_fingerprint_profile_id ?? null
+  sessionIdMaskingEnabled.value = account.session_id_masking_enabled === true
   cacheTTLOverrideEnabled.value = false
   cacheTTLOverrideTarget.value = '5m'
   customBaseUrlEnabled.value = false
@@ -5398,17 +5464,6 @@ function loadQuotaControlSettings(account: Account) {
 
   // UMQ mode（独立于 RPM 加载，防止编辑无 RPM 账号时丢失已有配置）
   userMsgQueueMode.value = account.user_msg_queue_mode ?? ''
-
-  // Load TLS fingerprint setting
-  if (account.enable_tls_fingerprint === true) {
-    tlsFingerprintEnabled.value = true
-  }
-  tlsFingerprintProfileId.value = account.tls_fingerprint_profile_id ?? null
-
-  // Load session ID masking setting
-  if (account.session_id_masking_enabled === true) {
-    sessionIdMaskingEnabled.value = true
-  }
 
   // Load cache TTL override setting
   if (account.cache_ttl_override_enabled === true) {
@@ -5829,6 +5884,17 @@ const handleSubmit = async () => {
         newCredentials.api_key = editApiKey.value.trim()
       }
 
+      if (isHeaderOverrideCapable(props.account.platform, 'upstream')) {
+        if (headerOverrideEnabled.value) {
+          const headerError = validateHeaderOverrideRows(headerOverrideRows.value)
+          if (headerError) {
+            appStore.showError(t(`admin.accounts.headerOverride.${headerError}`))
+            return
+          }
+        }
+        applyHeaderOverride(newCredentials, headerOverrideEnabled.value, headerOverrideRows.value, 'edit')
+      }
+
       // Add intercept warmup requests setting
       applyInterceptWarmup(newCredentials, interceptWarmupRequests.value, 'edit')
 
@@ -6062,7 +6128,6 @@ const handleSubmit = async () => {
     }
 
     // Antigravity: persist model mapping to credentials (applies to all antigravity types)
-    // Antigravity 只支持映射模式
     if (props.account.platform === 'antigravity') {
       const currentCredentials = (updatePayload.credentials as Record<string, unknown>) ||
         ((props.account.credentials as Record<string, unknown>) || {})
@@ -6075,20 +6140,16 @@ const handleSubmit = async () => {
       delete newCredentials.model_whitelist
       delete newCredentials.model_mapping
 
-      // 支持白名单模式与映射模式
-      const antigravityModelMapping = buildModelMappingObject(
+      Object.assign(newCredentials, buildAntigravityModelRestriction(
         antigravityModelRestrictionMode.value,
         antigravityWhitelistModels.value,
         antigravityModelMappings.value
-      )
-      if (antigravityModelMapping) {
-        newCredentials.model_mapping = antigravityModelMapping
-      }
+      ))
 
       updatePayload.credentials = newCredentials
     }
 
-    // For antigravity accounts, handle mixed_scheduling and allow_overages in extra
+    // For antigravity accounts, handle mixed_scheduling, allow_overages, TLS fingerprint, and session masking in extra
     if (props.account.platform === 'antigravity') {
       const currentExtra = (props.account.extra as Record<string, unknown>) || {}
       const newExtra: Record<string, unknown> = { ...currentExtra }
@@ -6101,6 +6162,22 @@ const handleSubmit = async () => {
         newExtra.allow_overages = true
       } else {
         delete newExtra.allow_overages
+      }
+      if (tlsFingerprintEnabled.value) {
+        newExtra.enable_tls_fingerprint = true
+        if (tlsFingerprintProfileId.value) {
+          newExtra.tls_fingerprint_profile_id = tlsFingerprintProfileId.value
+        } else {
+          delete newExtra.tls_fingerprint_profile_id
+        }
+      } else {
+        delete newExtra.enable_tls_fingerprint
+        delete newExtra.tls_fingerprint_profile_id
+      }
+      if (props.account.type === 'oauth' && sessionIdMaskingEnabled.value) {
+        newExtra.session_id_masking_enabled = true
+      } else {
+        delete newExtra.session_id_masking_enabled
       }
       updatePayload.extra = newExtra
     }

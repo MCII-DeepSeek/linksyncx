@@ -157,7 +157,7 @@ func (s *OpenAIGatewayService) ProbeOpenAITicket(ctx context.Context, account *A
 	enforceCodexIdentityHeadersWithUA(req.Header, account.GetOpenAIUserAgent())
 	account.ApplyHeaderOverrides(req.Header)
 
-	resp, err := s.httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
+	resp, err := s.doOpenAIUpstream(req, proxyURL, account)
 	if err != nil {
 		return result, fmt.Errorf("probe request failed: %w", err)
 	}

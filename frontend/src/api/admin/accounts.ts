@@ -743,7 +743,12 @@ export interface SyncUpstreamPreviewParams {
   type: string
   base_url?: string
   api_key: string
+  model_restriction_mode?: 'whitelist' | 'mapping'
   model_mapping?: Record<string, string>
+  header_override_enabled?: boolean
+  header_overrides?: Record<string, string>
+  enable_tls_fingerprint?: boolean
+  tls_fingerprint_profile_id?: number
   proxy_id?: number
   /** Perplexity cookie pair; never sent as a bearer token. */
   csrf_token?: string

@@ -305,7 +305,7 @@ func loadAntigravityUpstreamModelsCommon(
 	// type=upstream keeps a third-party API key. It must use that key against
 	// the account's own base URL. Treating it as OAuth sends the key to Google.
 	if antigravityUsesRelayModelList(account) {
-		return loadAntigravityRelayModelsWithDeps(ctx, account, httpUpstream, cfg, validateBaseURL, doRelay)
+		return loadAntigravityRelayModelsWithDeps(ctx, account, gatewaySvc, httpUpstream, cfg, validateBaseURL, doRelay)
 	}
 	return loadAntigravityOAuthModelsWithDeps(ctx, account, gatewaySvc, cfg)
 }
@@ -313,6 +313,7 @@ func loadAntigravityUpstreamModelsCommon(
 func loadAntigravityRelayModelsWithDeps(
 	ctx context.Context,
 	account *Account,
+	gatewaySvc *AntigravityGatewayService,
 	httpUpstream HTTPUpstream,
 	cfg *config.Config,
 	validateBaseURL func(string) (string, error),
@@ -332,6 +333,8 @@ func loadAntigravityRelayModelsWithDeps(
 	var resp *http.Response
 	if doRelay != nil {
 		resp, err = doRelay(req, proxyURL, account)
+	} else if tlsProfile := gatewaySvc.resolveTLSProfile(account); tlsProfile != nil {
+		resp, err = httpUpstream.DoWithTLS(req, proxyURL, account.ID, account.Concurrency, tlsProfile)
 	} else {
 		resp, err = httpUpstream.Do(req, proxyURL, account.ID, account.Concurrency)
 	}
@@ -375,9 +378,16 @@ func loadAntigravityOAuthModelsWithDeps(
 		return nil, err
 	}
 	ctx = withAntigravityDevice(ctx, account)
-	client, err := antigravity.NewClient(proxyURL)
+	var accountID int64
+	if account != nil {
+		accountID = account.ID
+	}
+	client, err := antigravity.NewClientForAccount(proxyURL, accountID, gatewaySvc.resolveTLSProfile(account))
 	if err != nil {
 		return nil, err
+	}
+	if accountID <= 0 {
+		defer client.CloseIdleConnections()
 	}
 	projectID := strings.TrimSpace(account.GetCredential("project_id"))
 	if projectID == "" {
@@ -459,6 +469,16 @@ func (s *AntigravityGatewayService) FetchGroupModels(
 	requireMixed bool,
 	maxSwitches int,
 ) ([]antigravity.ClaudeModel, *Account, bool) {
+	return s.fetchGroupModels(ctx, groupID, requireMixed, maxSwitches, false)
+}
+
+func (s *AntigravityGatewayService) fetchGroupModels(
+	ctx context.Context,
+	groupID *int64,
+	requireMixed bool,
+	maxSwitches int,
+	includeGeminiAliases bool,
+) ([]antigravity.ClaudeModel, *Account, bool) {
 	if s == nil || s.accountRepo == nil {
 		return nil, nil, false
 	}
@@ -501,11 +521,19 @@ func (s *AntigravityGatewayService) FetchGroupModels(
 	}
 
 	byID := make(map[string]antigravity.ClaudeModel)
-	addModels := func(items []antigravity.ClaudeModel) {
+	addModels := func(acc *Account, items []antigravity.ClaudeModel) {
+		raw := rawAntigravityModelMapping(acc)
 		for _, item := range items {
 			id := strings.TrimSpace(item.ID)
 			if id == "" || strings.Contains(id, "*") {
 				continue
+			}
+			if includeGeminiAliases {
+				if bare, ok := bareGeminiModelFromThinkingVariant(id); ok && (len(raw) == 0 || mappingSupportsRequestedModel(raw, bare)) {
+					if _, exists := byID[bare]; !exists {
+						byID[bare] = antigravity.ClaudeModel{ID: bare, Type: "model", DisplayName: bare}
+					}
+				}
 			}
 			item.ID = id
 			if existing, exists := byID[id]; exists {
@@ -535,17 +563,17 @@ func (s *AntigravityGatewayService) FetchGroupModels(
 		// persisted snapshots, or explicit custom mappings to avoid fanout storms.
 		if primaryAccount != nil {
 			if cached, ok := antigravityModelsCache.get(antigravityModelsCacheKey(acc), time.Now()); ok {
-				addModels(cached)
+				addModels(acc, cached)
 				continue
 			}
 			if snapModels, ok := fallbackAntigravityAccountModels(acc); ok {
-				addModels(snapModels)
+				addModels(acc, snapModels)
 				continue
 			}
 			for alias := range rawAntigravityModelMapping(acc) {
 				alias = strings.TrimSpace(alias)
 				if alias != "" && !strings.Contains(alias, "*") {
-					addModels([]antigravity.ClaudeModel{{ID: alias, Type: "model", DisplayName: alias}})
+					addModels(acc, []antigravity.ClaudeModel{{ID: alias, Type: "model", DisplayName: alias}})
 				}
 			}
 			continue
@@ -561,7 +589,7 @@ func (s *AntigravityGatewayService) FetchGroupModels(
 			continue
 		}
 		primaryAccount = acc
-		addModels(models)
+		addModels(acc, models)
 	}
 
 	if primaryAccount == nil {
@@ -570,7 +598,7 @@ func (s *AntigravityGatewayService) FetchGroupModels(
 		for i := range candidates {
 			acc := &candidates[i]
 			if snapModels, ok := fallbackAntigravityAccountModels(acc); ok {
-				addModels(snapModels)
+				addModels(acc, snapModels)
 				hadSnapshot = true
 				continue
 			}
@@ -580,7 +608,7 @@ func (s *AntigravityGatewayService) FetchGroupModels(
 				for alias := range raw {
 					alias = strings.TrimSpace(alias)
 					if alias != "" && !strings.Contains(alias, "*") {
-						addModels([]antigravity.ClaudeModel{{ID: alias, Type: "model", DisplayName: alias}})
+						addModels(acc, []antigravity.ClaudeModel{{ID: alias, Type: "model", DisplayName: alias}})
 					}
 				}
 			}
@@ -606,7 +634,7 @@ func (s *AntigravityGatewayService) FetchGroupGeminiModels(
 	requireMixed bool,
 	maxSwitches int,
 ) ([]gemini.Model, bool) {
-	claudeModels, _, ok := s.FetchGroupModels(ctx, groupID, requireMixed, maxSwitches)
+	claudeModels, _, ok := s.fetchGroupModels(ctx, groupID, requireMixed, maxSwitches, true)
 	if !ok {
 		return nil, false
 	}
@@ -629,9 +657,6 @@ func (s *AntigravityGatewayService) FetchGroupGeminiModels(
 	}
 	for _, m := range claudeModels {
 		addGemini(m.ID, m.DisplayName)
-		if bare, hasBare := bareGeminiModelFromThinkingVariant(m.ID); hasBare {
-			addGemini(bare, bare)
-		}
 	}
 	names := make([]string, 0, len(byName))
 	for name := range byName {

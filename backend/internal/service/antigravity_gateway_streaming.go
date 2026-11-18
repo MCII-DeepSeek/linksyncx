@@ -45,17 +45,71 @@ func (s *AntigravityGatewayService) observeAntigravityGeminiSSELine(c *gin.Conte
 // antigravityClientWriter 封装流式响应的客户端写入，自动检测断开并标记。
 // 断开后所有写入操作变为 no-op，调用方通过 Disconnected() 判断是否继续 drain 上游。
 type antigravityClientWriter struct {
-	w                gin.ResponseWriter
-	flusher          http.Flusher
-	disconnected     bool
-	prefix           string // 日志前缀，标识来源方法
-	beforeFirstWrite func()
-	writeTimeout     time.Duration
-	onDisconnect     func()
+	w                   gin.ResponseWriter
+	flusher             http.Flusher
+	rc                  *http.ResponseController
+	deadlineUnsupported bool
+	disconnected        bool
+	prefix              string // 日志前缀，标识来源方法
+	beforeFirstWrite    func()
+	writeTimeout        time.Duration
+	onDisconnect        func()
 }
 
+var (
+	sseDataPrefixBytes = []byte("data: ")
+	sseDoubleLFBytes   = []byte("\n\n")
+	sseSingleLFBytes   = []byte("\n")
+)
+
 func newAntigravityClientWriter(w gin.ResponseWriter, flusher http.Flusher, prefix string) *antigravityClientWriter {
-	return &antigravityClientWriter{w: w, flusher: flusher, prefix: prefix, writeTimeout: defaultAntigravityWriteTimeout}
+	var rc *http.ResponseController
+	if w != nil {
+		rc = http.NewResponseController(w)
+	}
+	return &antigravityClientWriter{
+		w:            w,
+		flusher:      flusher,
+		rc:           rc,
+		prefix:       prefix,
+		writeTimeout: defaultAntigravityWriteTimeout,
+	}
+}
+
+func (cw *antigravityClientWriter) armWriteDeadline() bool {
+	if cw.writeTimeout <= 0 || cw.rc == nil || cw.deadlineUnsupported {
+		return true
+	}
+	if err := cw.rc.SetWriteDeadline(time.Now().Add(cw.writeTimeout)); err != nil {
+		if errors.Is(err, http.ErrNotSupported) {
+			cw.deadlineUnsupported = true
+			return true
+		}
+		cw.markDisconnected()
+		return false
+	}
+	return true
+}
+
+func (cw *antigravityClientWriter) clearWriteDeadline() {
+	if cw.writeTimeout > 0 && cw.rc != nil && !cw.deadlineUnsupported {
+		_ = cw.rc.SetWriteDeadline(time.Time{})
+	}
+}
+
+func (cw *antigravityClientWriter) flush() bool {
+	if cw.flusher == nil {
+		return true
+	}
+	if flusher, ok := cw.flusher.(interface{ FlushError() error }); ok {
+		if err := flusher.FlushError(); err != nil {
+			cw.markDisconnected()
+			return false
+		}
+		return true
+	}
+	cw.flusher.Flush()
+	return true
 }
 
 // Write 写入数据到客户端，写入失败时标记断开并返回 false
@@ -64,27 +118,64 @@ func (cw *antigravityClientWriter) Write(p []byte) bool {
 		return false
 	}
 	cw.prepareFirstWrite()
-	controller := http.NewResponseController(cw.w)
-	if cw.writeTimeout > 0 {
-		if err := controller.SetWriteDeadline(time.Now().Add(cw.writeTimeout)); err != nil && !errors.Is(err, http.ErrNotSupported) {
-			cw.markDisconnected()
-			return false
-		}
-		defer func() { _ = controller.SetWriteDeadline(time.Time{}) }()
+	if !cw.armWriteDeadline() {
+		return false
 	}
-	if n, err := cw.w.Write(p); err != nil || n != len(p) {
+	n, err := cw.w.Write(p)
+	if err != nil || n != len(p) {
+		cw.clearWriteDeadline()
 		cw.markDisconnected()
 		return false
 	}
-	if flusher, ok := cw.flusher.(interface{ FlushError() error }); ok {
-		if err := flusher.FlushError(); err != nil {
-			cw.markDisconnected()
-			return false
-		}
-	} else {
-		cw.flusher.Flush()
+	flushed := cw.flush()
+	cw.clearWriteDeadline()
+	return flushed
+}
+
+// WriteSSEData 零拷贝拼接写出 "data: <payload>\n\n"，避免每个 SSE chunk 经 fmt.Appendf 重新分配整块切片。
+func (cw *antigravityClientWriter) WriteSSEData(payload []byte) bool {
+	if cw.disconnected {
+		return false
 	}
-	return true
+	cw.prepareFirstWrite()
+	if !cw.armWriteDeadline() {
+		return false
+	}
+	ok := cw.writeRaw(sseDataPrefixBytes) && cw.writeRaw(payload) && cw.writeRaw(sseDoubleLFBytes)
+	if !ok {
+		cw.clearWriteDeadline()
+		cw.markDisconnected()
+		return false
+	}
+	flushed := cw.flush()
+	cw.clearWriteDeadline()
+	return flushed
+}
+
+// WriteLine 零格式解析写出 "<line>\n"。
+func (cw *antigravityClientWriter) WriteLine(line string) bool {
+	if cw.disconnected {
+		return false
+	}
+	cw.prepareFirstWrite()
+	if !cw.armWriteDeadline() {
+		return false
+	}
+	n, err := cw.w.WriteString(line)
+	ok := err == nil && n == len(line) && cw.writeRaw(sseSingleLFBytes)
+	if !ok {
+		cw.clearWriteDeadline()
+		cw.markDisconnected()
+		return false
+	}
+	flushed := cw.flush()
+	cw.clearWriteDeadline()
+	return flushed
+}
+
+func (cw *antigravityClientWriter) writeRaw(p []byte) bool {
+	n, err := cw.w.Write(p)
+	return err == nil && n == len(p)
 }
 
 func (cw *antigravityClientWriter) Fprintf(format string, args ...any) bool {

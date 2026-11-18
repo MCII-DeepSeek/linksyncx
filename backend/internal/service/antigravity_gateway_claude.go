@@ -88,9 +88,9 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 		return nil, antigravityProxyUnavailableFailover(c, account, proxyErr, gatewayTransportFailoverBody)
 	}
 
-	// 获取转换选项
+	// 获取转换选项（自动注入账号级会话隔离与可选 15 分钟会话伪装）
 	// Antigravity 上游要求必须包含身份提示词，否则会返回 429
-	transformOpts := s.getClaudeTransformOptions(ctx)
+	transformOpts := s.getClaudeTransformOptionsForAccount(ctx, c, account)
 	transformOpts.EnableIdentityPatch = true // 强制启用，Antigravity 上游必需
 
 	// 转换 Claude 请求为 Gemini 格式
@@ -185,7 +185,7 @@ func (s *AntigravityGatewayService) Forward(ctx context.Context, c *gin.Context,
 
 				logger.LegacyPrintf("service.antigravity_gateway", "Antigravity account %d: detected signature-related 400, retrying once (%s)", account.ID, stage.name)
 
-				retryGeminiBody, txErr := antigravity.TransformClaudeToGeminiWithOptions(&retryClaudeReq, projectID, mappedModel, s.getClaudeTransformOptions(ctx))
+				retryGeminiBody, txErr := antigravity.TransformClaudeToGeminiWithOptions(&retryClaudeReq, projectID, mappedModel, transformOpts)
 				if txErr != nil {
 					continue
 				}

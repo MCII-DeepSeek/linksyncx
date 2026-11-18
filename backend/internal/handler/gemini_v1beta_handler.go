@@ -62,12 +62,11 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 
 	requireMixed := forcePlatform != service.PlatformAntigravity
 	var agModels []gemini.Model
+	var discovered bool
 	if h.antigravityGatewayService != nil {
-		if liveModels, ok := h.antigravityGatewayService.FetchGroupGeminiModels(c.Request.Context(), apiKey.GroupID, requireMixed, h.maxAccountSwitchesGemini); ok {
-			agModels = liveModels
-		}
+		agModels, discovered = h.antigravityGatewayService.FetchGroupGeminiModels(c.Request.Context(), apiKey.GroupID, requireMixed, h.maxAccountSwitchesGemini)
 	}
-	if len(agModels) == 0 && h.geminiCompatService != nil {
+	if !discovered && h.geminiCompatService != nil {
 		agModelIDs, err := h.geminiCompatService.AntigravityGeminiModelIDs(c.Request.Context(), apiKey.GroupID, requireMixed)
 		if err != nil {
 			googleError(c, http.StatusServiceUnavailable, "Unable to list Antigravity models")
@@ -85,7 +84,7 @@ func (h *GatewayHandler) GeminiV1BetaListModels(c *gin.Context) {
 
 	account, err := h.geminiCompatService.SelectAccountForAIStudioEndpoints(c.Request.Context(), apiKey.GroupID)
 	if err != nil {
-		if len(agModels) > 0 {
+		if discovered || len(agModels) > 0 {
 			c.JSON(http.StatusOK, gemini.ModelsListResponse{Models: filterGeminiModels(agModels)})
 			return
 		}
@@ -650,7 +649,9 @@ func (h *GatewayHandler) GeminiV1BetaModels(c *gin.Context) {
 			requestCtx = service.WithAccountSwitchCount(requestCtx, fs.SwitchCount, h.metadataBridgeEnabled())
 		}
 		sessionGroupID := derefGroupID(apiKey.GroupID)
-		if account.Platform == service.PlatformAntigravity && account.Type != service.AccountTypeAPIKey {
+		if account.Platform == service.PlatformAntigravity &&
+			account.Type != service.AccountTypeAPIKey &&
+			account.Type != service.AccountTypeUpstream {
 			result, err = h.antigravityGatewayService.ForwardGemini(
 				requestCtx,
 				c,

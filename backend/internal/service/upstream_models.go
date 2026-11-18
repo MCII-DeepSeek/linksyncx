@@ -1065,6 +1065,7 @@ func buildAntigravityRelayModelsRequest(
 	if account.Type == AccountTypeUpstream {
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
+	account.ApplyHeaderOverrides(req.Header)
 	return req, nil
 }
 
@@ -1291,9 +1292,23 @@ func (s *AccountTestService) fetchAntigravityOAuthUpstreamModels(ctx context.Con
 		return nil, nil, err
 	}
 	ctx = withAntigravityDevice(ctx, account)
-	client, err := antigravity.NewClient(proxyURL)
+	var accountID int64
+	if account != nil {
+		accountID = account.ID
+	}
+	var tlsSvc *TLSFingerprintProfileService
+	if s != nil {
+		tlsSvc = s.tlsFPProfileService
+		if tlsSvc == nil && s.antigravityGatewayService != nil {
+			tlsSvc = s.antigravityGatewayService.tlsFPProfileService
+		}
+	}
+	client, err := antigravity.NewClientForAccount(proxyURL, accountID, resolveAntigravityAccountTLSProfile(tlsSvc, account))
 	if err != nil {
 		return nil, nil, newUpstreamModelSyncConfigError("Failed to configure Antigravity client", err)
+	}
+	if accountID <= 0 {
+		defer client.CloseIdleConnections()
 	}
 	projectID := strings.TrimSpace(account.GetCredential("project_id"))
 	if projectID == "" {

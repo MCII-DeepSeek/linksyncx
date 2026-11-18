@@ -21,23 +21,125 @@ var (
 	sessionRandMutex sync.Mutex
 )
 
-// generateStableSessionID 基于用户消息内容生成稳定的 session ID
-func generateStableSessionID(contents []GeminiContent) string {
-	// 查找第一个 user 消息的文本
+const antigravitySessionMaskWindow = 15 * time.Minute
+
+func hashToAntigravitySessionID(input string) string {
+	h := sha256.Sum256([]byte(input))
+	n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
+	if n == 0 {
+		n = 1
+	}
+	var buf [24]byte
+	buf[0] = '-'
+	out := strconv.AppendInt(buf[:1], n, 10)
+	return string(out)
+}
+
+// isCanonicalAntigravitySessionID 判断是否为官方 Antigravity 客户端格式的 sessionId（"-<正整数>"）。
+func isCanonicalAntigravitySessionID(id string) bool {
+	if len(id) < 2 || len(id) > 21 || id[0] != '-' {
+		return false
+	}
+	for i := 1; i < len(id); i++ {
+		if id[i] < '0' || id[i] > '9' {
+			return false
+		}
+	}
+	return id[1] != '0'
+}
+
+// ExtractClientSessionHint 从下游 metadata.user_id（含 Claude Code 旧格式 user_..._session_<uuid>
+// 与 JSON 新格式 {"session_id":"..."}）或普通会话头中提取纯粹的会话级标识，剥离下游客户端的
+// machine_id / device_id / account_uuid 指纹。
+func ExtractClientSessionHint(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "{") && strings.HasSuffix(trimmed, "}") {
+		var parsed struct {
+			SessionID string `json:"session_id"`
+		}
+		if json.Unmarshal([]byte(trimmed), &parsed) == nil && strings.TrimSpace(parsed.SessionID) != "" {
+			return strings.TrimSpace(parsed.SessionID)
+		}
+	}
+	if idx := strings.Index(trimmed, "_session_"); idx >= 0 {
+		if s := strings.TrimSpace(trimmed[idx+len("_session_"):]); s != "" {
+			return s
+		}
+	}
+	return trimmed
+}
+
+// DeriveAntigravitySessionID 统一生成与官方客户端形态一致的 v1internal sessionId（"-<63位整数>"）：
+//  1. 开启 maskSession 且提供了 accountSeed：在 15 分钟时间桶内收敛为账号级单一固定会话 ID
+//     （对齐 Claude session_id_masking_enabled 与 OpenAI 会话收敛，隐藏多人共享痕迹）；
+//  2. 开启 sanitize：剥离下游 Claude Code 的 user_<device>_account_<uuid> 指纹，按
+//     accountSeed + clientSessionHint（或首条 user 文本）确定性派生官方格式 sessionId，
+//     保证同账号多轮对话稳定、跨账号故障转移互不关联；
+//  3. 未开启 sanitize（包级默认直调兼容路径）：若传了 rawClientSessionID 原样保留，否则按首条用户消息派生。
+func DeriveAntigravitySessionID(rawClientSessionID, firstUserText, accountSeed string, maskSession, sanitize bool) string {
+	return deriveAntigravitySessionIDAt(rawClientSessionID, firstUserText, accountSeed, maskSession, sanitize, time.Now())
+}
+
+func deriveAntigravitySessionIDAt(rawClientSessionID, firstUserText, accountSeed string, maskSession, sanitize bool, now time.Time) string {
+	seed := strings.TrimSpace(accountSeed)
+	if maskSession && seed != "" {
+		bucket := now.Unix() / int64(antigravitySessionMaskWindow.Seconds())
+		return hashToAntigravitySessionID("sub2api:ag-masked-session:v1:" + seed + ":" + strconv.FormatInt(bucket, 10))
+	}
+
+	raw := strings.TrimSpace(rawClientSessionID)
+	if !sanitize {
+		if raw != "" {
+			return raw
+		}
+		if firstUserText != "" {
+			return hashToAntigravitySessionID(firstUserText)
+		}
+		sessionRandMutex.Lock()
+		n := sessionRand.Int63n(9_000_000_000_000_000_000) + 1
+		sessionRandMutex.Unlock()
+		return "-" + strconv.FormatInt(n, 10)
+	}
+
+	if hint := ExtractClientSessionHint(raw); hint != "" {
+		if seed == "" && isCanonicalAntigravitySessionID(hint) {
+			return hint
+		}
+		return hashToAntigravitySessionID("sub2api:ag-session:v1:" + seed + ":" + hint)
+	}
+	if firstUserText != "" {
+		if seed == "" {
+			return hashToAntigravitySessionID(firstUserText)
+		}
+		return hashToAntigravitySessionID("sub2api:ag-msg-session:v1:" + seed + ":" + firstUserText)
+	}
+	if seed != "" {
+		bucket := now.Unix() / int64(antigravitySessionMaskWindow.Seconds())
+		return hashToAntigravitySessionID("sub2api:ag-ambient-session:v1:" + seed + ":" + strconv.FormatInt(bucket, 10))
+	}
+	sessionRandMutex.Lock()
+	n := sessionRand.Int63n(9_000_000_000_000_000_000) + 1
+	sessionRandMutex.Unlock()
+	return "-" + strconv.FormatInt(n, 10)
+}
+
+func firstUserMessageText(contents []GeminiContent) string {
 	for _, content := range contents {
 		if content.Role == "user" && len(content.Parts) > 0 {
 			if text := content.Parts[0].Text; text != "" {
-				h := sha256.Sum256([]byte(text))
-				n := int64(binary.BigEndian.Uint64(h[:8])) & 0x7FFFFFFFFFFFFFFF
-				return "-" + strconv.FormatInt(n, 10)
+				return text
 			}
 		}
 	}
-	// 回退：生成随机 session ID
-	sessionRandMutex.Lock()
-	n := sessionRand.Int63n(9_000_000_000_000_000_000)
-	sessionRandMutex.Unlock()
-	return "-" + strconv.FormatInt(n, 10)
+	return ""
+}
+
+// generateStableSessionID 基于用户消息内容生成稳定的 session ID
+func generateStableSessionID(contents []GeminiContent) string {
+	return DeriveAntigravitySessionID("", firstUserMessageText(contents), "", false, false)
 }
 
 type TransformOptions struct {
@@ -46,6 +148,14 @@ type TransformOptions struct {
 	// 为空时使用默认模板（包含 [IDENTITY_PATCH] 及 SYSTEM_PROMPT_BEGIN 标记）。
 	IdentityPatch string
 	EnableMCPXML  bool
+	// AccountSessionSeed 账号级隔离种子（如账号 ID），防止跨账号 failover 共享同一 sessionId。
+	AccountSessionSeed string
+	// MaskSessionID 开启后将账号会话收敛到 15 分钟时间窗口的固定官方格式 sessionId。
+	MaskSessionID bool
+	// SanitizeSessionID 开启后清洗下游异构客户端（如 Claude Code metadata.user_id）身份特征并转为官方格式。
+	SanitizeSessionID bool
+	// ClientSessionHint 可选：来自请求头（如 session_id / x-claude-code-session-id）的会话线索兜底。
+	ClientSessionHint string
 }
 
 func DefaultTransformOptions() TransformOptions {
@@ -145,10 +255,19 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 	tools := buildTools(claudeReq.Tools)
 
 	// 5. 构建内部请求
+	rawSessionHint := opts.ClientSessionHint
+	if claudeReq.Metadata != nil && claudeReq.Metadata.UserID != "" {
+		rawSessionHint = claudeReq.Metadata.UserID
+	}
 	innerRequest := GeminiRequest{
 		Contents: contents,
-		// 总是生成 sessionId，基于用户消息内容
-		SessionID: generateStableSessionID(contents),
+		SessionID: DeriveAntigravitySessionID(
+			rawSessionHint,
+			firstUserMessageText(contents),
+			opts.AccountSessionSeed,
+			opts.MaskSessionID,
+			opts.SanitizeSessionID || opts.MaskSessionID || opts.AccountSessionSeed != "",
+		),
 	}
 
 	// toolConfig must always be present: upstream rejects requests without it,
@@ -172,15 +291,10 @@ func TransformClaudeToGeminiWithOptions(claudeReq *ClaudeRequest, projectID, map
 		innerRequest.Tools = tools
 	}
 
-	// 如果提供了 metadata.user_id，优先使用
-	if claudeReq.Metadata != nil && claudeReq.Metadata.UserID != "" {
-		innerRequest.SessionID = claudeReq.Metadata.UserID
-	}
-
 	// 6. 包装为 v1internal 请求
 	v1Req := V1InternalRequest{
 		Project:     projectID,
-		RequestID:   "agent-" + uuid.New().String(),
+		RequestID:   "agent-" + uuid.NewString(),
 		UserAgent:   "antigravity", // 固定值，与官方客户端一致
 		RequestType: requestType,
 		Model:       targetModel,
@@ -215,33 +329,32 @@ type modelInfo struct {
 	CanonicalID string // 规范模型 ID，如 "claude-opus-4-5-20250929"
 }
 
-// modelInfoMap 模型前缀 → 模型信息映射
-// 只有在此映射表中的模型才会注入身份提示词
-// 注意：模型映射逻辑在网关层完成；这里仅用于按模型前缀判断是否注入身份提示词。
-var modelInfoMap = map[string]modelInfo{
-	"claude-fable-5-1":  {DisplayName: "Claude Fable 5.1", CanonicalID: "claude-fable-5-1"},
-	"claude-fable-5":    {DisplayName: "Claude Fable 5", CanonicalID: "claude-fable-5"},
-	"claude-opus-4-8":   {DisplayName: "Claude Opus 4.8", CanonicalID: "claude-opus-4-8"},
-	"claude-opus-4-7":   {DisplayName: "Claude Opus 4.7", CanonicalID: "claude-opus-4-7"},
-	"claude-opus-4-5":   {DisplayName: "Claude Opus 4.5", CanonicalID: "claude-opus-4-5-20250929"},
-	"claude-opus-4-6":   {DisplayName: "Claude Opus 4.6", CanonicalID: "claude-opus-4-6"},
-	"claude-sonnet-4-6": {DisplayName: "Claude Sonnet 4.6", CanonicalID: "claude-sonnet-4-6"},
-	"claude-sonnet-4-5": {DisplayName: "Claude Sonnet 4.5", CanonicalID: "claude-sonnet-4-5-20250929"},
-	"claude-haiku-4-5":  {DisplayName: "Claude Haiku 4.5", CanonicalID: "claude-haiku-4-5-20251001"},
+type modelPrefixEntry struct {
+	prefix string
+	info   modelInfo
 }
 
-// getModelInfo 根据模型 ID 获取模型信息（前缀匹配）
-func getModelInfo(modelID string) (info modelInfo, matched bool) {
-	var bestMatch string
+// orderedModelPrefixes 按前缀长度从长到短排列，避免每次请求遍历无序 map。
+var orderedModelPrefixes = []modelPrefixEntry{
+	{prefix: "claude-sonnet-4-6", info: modelInfo{DisplayName: "Claude Sonnet 4.6", CanonicalID: "claude-sonnet-4-6"}},
+	{prefix: "claude-sonnet-4-5", info: modelInfo{DisplayName: "Claude Sonnet 4.5", CanonicalID: "claude-sonnet-4-5-20250929"}},
+	{prefix: "claude-fable-5-1", info: modelInfo{DisplayName: "Claude Fable 5.1", CanonicalID: "claude-fable-5-1"}},
+	{prefix: "claude-haiku-4-5", info: modelInfo{DisplayName: "Claude Haiku 4.5", CanonicalID: "claude-haiku-4-5-20251001"}},
+	{prefix: "claude-opus-4-8", info: modelInfo{DisplayName: "Claude Opus 4.8", CanonicalID: "claude-opus-4-8"}},
+	{prefix: "claude-opus-4-7", info: modelInfo{DisplayName: "Claude Opus 4.7", CanonicalID: "claude-opus-4-7"}},
+	{prefix: "claude-opus-4-6", info: modelInfo{DisplayName: "Claude Opus 4.6", CanonicalID: "claude-opus-4-6"}},
+	{prefix: "claude-opus-4-5", info: modelInfo{DisplayName: "Claude Opus 4.5", CanonicalID: "claude-opus-4-5-20250929"}},
+	{prefix: "claude-fable-5", info: modelInfo{DisplayName: "Claude Fable 5", CanonicalID: "claude-fable-5"}},
+}
 
-	for prefix, mi := range modelInfoMap {
-		if strings.HasPrefix(modelID, prefix) && len(prefix) > len(bestMatch) {
-			bestMatch = prefix
-			info = mi
+// getModelInfo 根据模型 ID 获取模型信息（最长前缀优先匹配）
+func getModelInfo(modelID string) (info modelInfo, matched bool) {
+	for i := range orderedModelPrefixes {
+		if strings.HasPrefix(modelID, orderedModelPrefixes[i].prefix) {
+			return orderedModelPrefixes[i].info, true
 		}
 	}
-
-	return info, bestMatch != ""
+	return modelInfo{}, false
 }
 
 // GetModelDisplayName 根据模型 ID 获取人类可读的显示名称
@@ -419,7 +532,7 @@ func buildSystemInstruction(system json.RawMessage, modelName string, opts Trans
 
 // buildContents 构建 contents
 func buildContents(messages []ClaudeMessage, toolIDToName map[string]string, isThinkingEnabled, allowDummyThought bool) ([]GeminiContent, []GeminiPart, bool, error) {
-	var contents []GeminiContent
+	contents := make([]GeminiContent, 0, len(messages))
 	var systemParts []GeminiPart
 	strippedThinking := false
 
