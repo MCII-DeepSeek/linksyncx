@@ -10,6 +10,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestValidateSignupEmailAddress(t *testing.T) {
+	for _, email := range []string{"user@gmail.com", "first.last@example.com", "user@sub.example.com"} {
+		require.NoError(t, validateSignupEmailAddress(email), email)
+	}
+	for _, email := range []string{
+		"first.last@GMAIL.COM", "first.last@googlemail.com.", "user+tag@example.com",
+		"Display Name <first.last@gmail.com>", "+tag@example.com",
+	} {
+		require.ErrorIs(t, validateSignupEmailAddress(email), ErrRegistrationEmailAliasNotAllowed, email)
+	}
+}
+
 func TestNormalizeEmailForAliasDedup(t *testing.T) {
 	cases := []struct {
 		name  string

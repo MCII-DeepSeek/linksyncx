@@ -391,8 +391,45 @@ func TestAuthService_Register_AliasDuplicateRejected(t *testing.T) {
 		SettingKeyRegistrationEnabled: "true",
 	}, nil, nil)
 
-	_, _, err := service.Register(context.Background(), "some.one+bulk294@gmail.com", "password")
+	_, _, err := service.Register(context.Background(), "someone@gmail.com", "password")
 	require.ErrorIs(t, err, ErrEmailExists)
+	require.Empty(t, repo.created)
+}
+
+func TestAuthService_Register_RejectsAliasBeforeVerification(t *testing.T) {
+	repo := &userRepoStub{}
+	auth := newAuthService(repo, map[string]string{
+		SettingKeyRegistrationEnabled: "true",
+		SettingKeyEmailVerifyEnabled:  "true",
+	}, nil, nil)
+	ctx := context.Background()
+	for _, email := range []string{"first.last@gmail.com", "first.last@GOOGLEMAIL.COM", "first+tag@example.com"} {
+		t.Run(email, func(t *testing.T) {
+			_, _, err := auth.Register(ctx, email, "password")
+			require.ErrorIs(t, err, ErrRegistrationEmailAliasNotAllowed)
+			require.ErrorIs(t, auth.SendVerifyCode(ctx, email), ErrRegistrationEmailAliasNotAllowed)
+			_, err = auth.SendVerifyCodeAsync(ctx, email)
+			require.ErrorIs(t, err, ErrRegistrationEmailAliasNotAllowed)
+			_, _, err = auth.RegisterOAuthEmailAccount(ctx, email, "password", "", "", "google")
+			require.ErrorIs(t, err, ErrRegistrationEmailAliasNotAllowed)
+			_, _, err = auth.RegisterVerifiedOAuthEmailAccount(ctx, email, "password", "", "google")
+			require.ErrorIs(t, err, ErrRegistrationEmailAliasNotAllowed)
+		})
+	}
+	require.Empty(t, repo.created)
+}
+
+func TestAuthService_LoginOrRegisterOAuth_OnlyBlocksNewAliasAccounts(t *testing.T) {
+	const existingEmail = "first.last@gmail.com"
+	repo := &userRepoStub{user: &User{ID: 15, Email: existingEmail, Status: StatusActive}}
+	auth := newAuthService(repo, map[string]string{SettingKeyRegistrationEnabled: "true"}, nil, nil)
+	ctx := context.Background()
+
+	_, existing, err := auth.LoginOrRegisterOAuth(ctx, existingEmail, "")
+	require.NoError(t, err)
+	require.Equal(t, int64(15), existing.ID)
+	_, _, err = auth.LoginOrRegisterOAuth(ctx, "new.user@googlemail.com", "")
+	require.ErrorIs(t, err, ErrRegistrationEmailAliasNotAllowed)
 	require.Empty(t, repo.created)
 }
 

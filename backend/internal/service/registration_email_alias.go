@@ -2,7 +2,10 @@ package service
 
 import (
 	"context"
+	"net/mail"
 	"strings"
+
+	infraerrors "github.com/Wei-Shaw/sub2api/internal/pkg/errors"
 )
 
 // Email alias normalization for registration dedup.
@@ -124,6 +127,22 @@ func stripEmailLocalDots(local string) string {
 func isGmailFamilyDomain(domain string) bool {
 	_, ok := gmailFamilyDomains[domain]
 	return ok
+}
+
+var ErrRegistrationEmailAliasNotAllowed = infraerrors.BadRequest(
+	"REGISTRATION_EMAIL_ALIAS_NOT_ALLOWED",
+	"Use an email without a plus sign before @. Gmail and Googlemail addresses must also omit dots before @.",
+)
+
+func validateSignupEmailAddress(email string) error {
+	if address, err := mail.ParseAddress(email); err == nil {
+		email = address.Address
+	}
+	local, domain, ok := splitEmailForPolicy(email)
+	if ok && (strings.Contains(local, "+") || (isGmailFamilyDomain(domain) && strings.Contains(local, "."))) {
+		return ErrRegistrationEmailAliasNotAllowed
+	}
+	return nil
 }
 
 // existsByEmailOrAlias reports whether an email — or any alias variant that

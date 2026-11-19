@@ -1109,10 +1109,14 @@ async function handleRegister(): Promise<void> {
 }
 
 function buildRegistrationErrorMessage(error: unknown, fallback: string): string {
-  if (extractApiErrorCode(error) === 'EMAIL_DOMAIN_REGISTRATION_LIMIT') {
-    return t('auth.emailDomainRegistrationLimit')
+  switch (extractApiErrorCode(error)) {
+    case 'REGISTRATION_EMAIL_ALIAS_NOT_ALLOWED':
+      return t('auth.registrationEmailAliasNotAllowed')
+    case 'EMAIL_DOMAIN_REGISTRATION_LIMIT':
+      return t('auth.emailDomainRegistrationLimit')
+    default:
+      return buildAuthErrorMessage(error, { fallback })
   }
-  return buildAuthErrorMessage(error, { fallback })
 }
 </script>
 

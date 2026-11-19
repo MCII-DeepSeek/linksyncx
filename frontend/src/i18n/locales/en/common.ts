@@ -261,6 +261,7 @@ export default {
       USER_NOT_ACTIVE: 'Account has been disabled.',
     },
     registrationFailed: 'Registration failed. Please try again.',
+    registrationEmailAliasNotAllowed: 'Use an email without a plus sign before @. Gmail and Googlemail addresses must also omit dots before @.',
     emailDomainRegistrationLimit:
       'This email domain cannot register another account. Please use a mainstream email, or contact support to add your enterprise domain to the allowlist.',
     emailSuffixNotAllowed: 'This email domain is not allowed for registration.',
