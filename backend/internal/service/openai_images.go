@@ -1059,7 +1059,7 @@ func openAIImagesStreamDataURL(data []byte, fallbackFormat string) []byte {
 	if format == "" {
 		format = fallbackFormat
 	}
-	updated, err := sjson.SetBytes(data, "url", "data:"+openAIImageOutputMIMEType(format)+";base64,"+b64)
+	updated, err := sjson.SetBytes(data, "url", "data:"+openAIImageOutputMIMEType(format, b64)+";base64,"+b64)
 	if err != nil {
 		return data
 	}

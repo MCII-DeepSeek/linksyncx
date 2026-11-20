@@ -166,7 +166,7 @@ func parseCodexDirectImagesResponse(body []byte) ([]openAIResponsesImageResult, 
 
 func codexDirectImageURL(body []byte, path, outputFormat string) []byte {
 	if result := gjson.GetBytes(body, path+"b64_json").String(); result != "" {
-		body, _ = sjson.SetBytes(body, path+"url", "data:"+openAIImageOutputMIMEType(outputFormat)+";base64,"+result)
+		body, _ = sjson.SetBytes(body, path+"url", "data:"+openAIImageOutputMIMEType(outputFormat, result)+";base64,"+result)
 		body, _ = sjson.DeleteBytes(body, path+"b64_json")
 	}
 	return body

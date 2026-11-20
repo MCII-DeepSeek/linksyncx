@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"io"
@@ -37,6 +38,32 @@ func TestDetectOpenAIImageResultSize(t *testing.T) {
 	require.Equal(t, "640x480", detectOpenAIImageResultSize(webpVP8LEncoded))
 	require.Empty(t, detectOpenAIImageResultSize("data:image/png;base64"))
 	require.Empty(t, detectOpenAIImageResultSize("not-image-data"))
+}
+
+func TestOpenAIImagesPreserveAnimatedGIF(t *testing.T) {
+	colors := color.Palette{color.Black, color.White}
+	first := image.NewPaletted(image.Rect(0, 0, 15, 20), colors)
+	second := image.NewPaletted(first.Bounds(), colors)
+	second.SetColorIndex(0, 0, 1)
+	var data bytes.Buffer
+	require.NoError(t, gif.EncodeAll(&data, &gif.GIF{Image: []*image.Paletted{first, second}, Delay: []int{20, 20}}))
+	encoded := base64.StdEncoding.EncodeToString(data.Bytes())
+	require.Equal(t, "15x20", detectOpenAIImageResultSize(encoded))
+
+	// The relay returned no output_format. Neither URL response path should
+	// label the GIF as PNG or alter the frame data.
+	url := "data:image/gif;base64," + encoded
+	nonStream := openAIImagesB64ToDataURLs([]byte(fmt.Sprintf(`{"data":[{"b64_json":%q}]}`, encoded)), "")
+	require.Equal(t, url, gjson.GetBytes(nonStream, "data.0.url").String())
+	stream := openAIImagesStreamDataURL([]byte(fmt.Sprintf(`{"b64_json":%q}`, encoded)), "")
+	require.Equal(t, url, gjson.GetBytes(stream, "url").String())
+
+	direct := codexDirectImageURL([]byte(fmt.Sprintf(`{"data":[{"b64_json":%q}]}`, encoded)), "data.0.", "png")
+	require.Equal(t, url, gjson.GetBytes(direct, "data.0.url").String())
+	result := openAIResponsesImageResult{Result: encoded, OutputFormat: "png"}
+	response, err := buildOpenAIImagesAPIResponse([]openAIResponsesImageResult{result}, 1, nil, result, "url")
+	require.NoError(t, err)
+	require.Equal(t, url, gjson.GetBytes(response, "data.0.url").String())
 }
 
 func TestOpenAIGatewayServiceForwardImages_OAuthUsesDecodedOutputDimensions(t *testing.T) {

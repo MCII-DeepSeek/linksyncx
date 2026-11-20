@@ -247,7 +247,7 @@ func buildOpenAIImagesStreamPartialPayload(
 	payload, _ = sjson.SetBytes(payload, "partial_image_index", partialImageIndex)
 	payload, _ = sjson.SetBytes(payload, "b64_json", b64)
 	if strings.EqualFold(strings.TrimSpace(responseFormat), "url") {
-		payload, _ = sjson.SetBytes(payload, "url", "data:"+openAIImageOutputMIMEType(meta.OutputFormat)+";base64,"+b64)
+		payload, _ = sjson.SetBytes(payload, "url", "data:"+openAIImageOutputMIMEType(meta.OutputFormat, b64)+";base64,"+b64)
 	}
 	if meta.Background != "" {
 		payload, _ = sjson.SetBytes(payload, "background", meta.Background)
@@ -283,7 +283,7 @@ func buildOpenAIImagesStreamCompletedPayload(
 	payload, _ = sjson.SetBytes(payload, "created_at", createdAt)
 	payload, _ = sjson.SetBytes(payload, "b64_json", img.Result)
 	if strings.EqualFold(strings.TrimSpace(responseFormat), "url") {
-		payload, _ = sjson.SetBytes(payload, "url", "data:"+openAIImageOutputMIMEType(img.OutputFormat)+";base64,"+img.Result)
+		payload, _ = sjson.SetBytes(payload, "url", "data:"+openAIImageOutputMIMEType(img.OutputFormat, img.Result)+";base64,"+img.Result)
 	}
 	if img.Background != "" {
 		payload, _ = sjson.SetBytes(payload, "background", img.Background)
@@ -306,21 +306,25 @@ func buildOpenAIImagesStreamCompletedPayload(
 	return payload
 }
 
-func openAIImageOutputMIMEType(outputFormat string) string {
-	if outputFormat == "" {
-		return "image/png"
+func openAIImageOutputMIMEType(outputFormat, encodedImage string) string {
+	// Some relays omit output_format or echo the requested format. Check the
+	// GIF87a and GIF89a signatures without decoding the rest of the image.
+	if strings.HasPrefix(encodedImage, "R0lGODdh") || strings.HasPrefix(encodedImage, "R0lGODlh") {
+		return "image/gif"
 	}
-	if strings.Contains(outputFormat, "/") {
-		return outputFormat
-	}
-	switch strings.ToLower(strings.TrimSpace(outputFormat)) {
+	switch format := strings.ToLower(strings.TrimSpace(outputFormat)); format {
 	case "png":
 		return "image/png"
 	case "jpg", "jpeg":
 		return "image/jpeg"
 	case "webp":
 		return "image/webp"
+	case "gif":
+		return "image/gif"
 	default:
+		if strings.Contains(format, "/") {
+			return format
+		}
 		return "image/png"
 	}
 }
@@ -1053,7 +1057,7 @@ func buildOpenAIImagesAPIResponse(
 	for _, img := range results {
 		item := []byte(`{}`)
 		if format == "url" {
-			item, _ = sjson.SetBytes(item, "url", "data:"+openAIImageOutputMIMEType(img.OutputFormat)+";base64,"+img.Result)
+			item, _ = sjson.SetBytes(item, "url", "data:"+openAIImageOutputMIMEType(img.OutputFormat, img.Result)+";base64,"+img.Result)
 		} else {
 			item, _ = sjson.SetBytes(item, "b64_json", img.Result)
 		}

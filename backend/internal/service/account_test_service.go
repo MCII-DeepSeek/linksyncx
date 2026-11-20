@@ -3386,7 +3386,7 @@ func (s *AccountTestService) testOpenAIImageOAuth(c *gin.Context, ctx context.Co
 		if item.RevisedPrompt != "" {
 			s.sendEvent(c, TestEvent{Type: "content", Text: item.RevisedPrompt})
 		}
-		mimeType := openAIImageOutputMIMEType(item.OutputFormat)
+		mimeType := openAIImageOutputMIMEType(item.OutputFormat, item.Result)
 		s.sendEvent(c, TestEvent{
 			Type:     "image",
 			ImageURL: "data:" + mimeType + ";base64," + item.Result,
